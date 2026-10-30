@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.23-alpine AS build
+# go.mod 要求 go 1.26.0；官方镜像默认 GOTOOLCHAIN=local，基础镜像版本低于 go.mod
+# 会在 go mod download 直接失败，故这里必须对齐到 1.26。
+FROM golang:1.26-alpine AS build
 WORKDIR /src
-COPY go.mod ./
+# go.sum 一并复制：缺少校验条目时 go mod download 也会失败
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
