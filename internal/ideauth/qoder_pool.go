@@ -115,6 +115,10 @@ func UpdateQoderPool(fn func(*QoderPoolFile) error) error {
 // UpsertQoderAccount 把当前登录态存入号池（按 Email 去重）。
 // 返回是否新增账号。
 func UpsertQoderAccount() (*QoderSnapshot, bool, error) {
+	if QoderServerMode() {
+		s, err := readQoderServerSnapshot()
+		return s, false, err
+	}
 	snap, err := CaptureQoderSnapshot()
 	if err != nil {
 		return nil, false, err
@@ -158,12 +162,18 @@ func RemoveQoderAccount(email string) error {
 // SwitchQoderTo 把号池中指定邮箱的登录态写入 Qoder（切号核心）。
 // 保存当前登录态到号池后再切换，避免丢失当前账号。
 func SwitchQoderTo(email string, restoreMachineID bool) (*QoderSnapshot, error) {
+	if QoderServerMode() {
+		return switchQoderServerTo(email)
+	}
 	f, err := LoadQoderPool()
 	if err != nil {
 		return nil, err
 	}
 	var target *QoderSnapshot
 	for _, a := range f.Accounts {
+		if a == nil {
+			continue
+		}
 		if strings.EqualFold(a.Email, email) {
 			target = a
 			break
@@ -200,7 +210,8 @@ type QoderAccountView struct {
 	// 每日额度，见 QoderQuotaGroupKey 的注释）。
 	Scope string `json:"scope,omitempty"`
 	// ScopeLabel scope 的短标签，给人看。
-	ScopeLabel string `json:"scope_label,omitempty"`
+	ScopeLabel    string `json:"scope_label,omitempty"`
+	IdentityLabel string `json:"identity_label,omitempty"`
 	// QuotaGroup 该账号所在**同一人组**里的账号数（含自己）。
 	// >1 = 服务端已判定它与别的号是同一个人，每天只有一份每日额度。
 	QuotaGroup int `json:"quota_group,omitempty"`
@@ -214,12 +225,15 @@ func ListQoderAccounts() ([]QoderAccountView, error) {
 	}
 	curEmail := ""
 	if cur, err := ReadQoderAuth(); err == nil {
-		curEmail = cur.User.Email
+		curEmail = QoderIdentityKey(cur)
 	}
 	now := time.Now().UTC()
 	sizes := QoderQuotaGroupSizes(f.Accounts)
 	out := make([]QoderAccountView, 0, len(f.Accounts))
 	for _, a := range f.Accounts {
+		if a == nil {
+			continue
+		}
 		exp := false
 		if a.Auth != nil && a.Auth.ExpiresAt != "" {
 			if t, err := time.Parse(time.RFC3339, a.Auth.ExpiresAt); err == nil && t.Before(now) {
@@ -227,19 +241,28 @@ func ListQoderAccounts() ([]QoderAccountView, error) {
 			}
 		}
 		scope := QoderQuotaScopeKey(a)
+		identityLabel := a.Email
+		if a.Auth != nil {
+			if a.Auth.User.Email != "" {
+				identityLabel = a.Auth.User.Email
+			} else if a.UserID != "" {
+				identityLabel = "UID " + a.UserID
+			}
+		}
 		out = append(out, QoderAccountView{
-			Email:      a.Email,
-			UserID:     a.UserID,
-			Name:       a.Name,
-			ExpiresAt:  expAt(a),
-			Expired:    exp,
-			Current:    strings.EqualFold(a.Email, curEmail),
-			SavedAt:    a.SavedAt,
-			MachineID:  a.MachineID,
-			DeviceID:   a.DeviceID,
-			Scope:      scope,
-			ScopeLabel: QoderQuotaScopeLabel(scope),
-			QuotaGroup: sizes[strings.ToLower(strings.TrimSpace(a.Email))],
+			IdentityLabel: identityLabel,
+			Email:         a.Email,
+			UserID:        a.UserID,
+			Name:          a.Name,
+			ExpiresAt:     expAt(a),
+			Expired:       exp,
+			Current:       strings.EqualFold(a.Email, curEmail),
+			SavedAt:       a.SavedAt,
+			MachineID:     a.MachineID,
+			DeviceID:      a.DeviceID,
+			Scope:         scope,
+			ScopeLabel:    QoderQuotaScopeLabel(scope),
+			QuotaGroup:    sizes[strings.ToLower(strings.TrimSpace(a.Email))],
 		})
 	}
 	return out, nil
@@ -319,7 +342,7 @@ func qoderSnapshotEmail(a *QoderSnapshot) string {
 		return em
 	}
 	if a.Auth != nil {
-		return strings.TrimSpace(a.Auth.User.Email)
+		return QoderIdentityKey(a.Auth)
 	}
 	return ""
 }
