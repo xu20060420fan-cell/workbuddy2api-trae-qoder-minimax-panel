@@ -72,22 +72,24 @@ func startQoderAutoCheckin(ctx context.Context) {
 			if err != nil || pool == nil || len(pool.Accounts) == 0 {
 				return
 			}
-			// 可信记录（今日 10:05 后写入）的账号无需巡检；其余账号照常参与。
-			pending := false
-			for _, a := range pool.Accounts {
-				if a == nil {
-					continue
-				}
-				if ideauth.CheckinRecordTrusted("qoder", a.Email) {
-					continue
-				}
-				pending = true
-				break
-			}
-			if !pending {
+			// v4（2026-11-10）：待签名单**以上游口径**为准，不再靠本地记录猜。
+			//
+			// 旧逻辑（本地可信记录）：只要还有一个号没有可信的今日记录，就把
+			// **整个号池**重新打一遍 —— 包括今天已经领到的号（重复打、重复消耗
+			// 上游配额），而且对「上游今天压根没给这个号建 grant」的号，会一直
+			// 保持 pending 状态把整轮重试永久拖住。
+			//
+			// 新逻辑（QoderPendingEmails）：只向**上游**逐号核实，列出
+			//   - 今天还没领到每日额度、且
+			//   - 不是被「同一个人的另一个号」领走的
+			// 这些号。只对它们发起领取 —— 上游一旦延迟下发（例如 10:00 之后
+			// 过了十几分钟才建 grant），下一轮就能自动领到，不用用户点按钮。
+			pending := ideauth.QoderPendingEmails()
+			if len(pending) == 0 {
+				// 全员已落定（领到 / 被同人领走 / 已是今天）：没有待办，不打扰。
 				return
 			}
-			res, err := ideauth.QoderCheckinPool(nil)
+			res, err := ideauth.QoderCheckinPool(pending)
 			if err != nil || res == nil {
 				if err != nil {
 					log.Printf("[qoder-retry] 签到重试失败: %v", err)
@@ -96,7 +98,7 @@ func startQoderAutoCheckin(ctx context.Context) {
 			}
 			// **任何一种结果都要留痕**：包括"上游还没下发"（pending）。
 			// 静默是这次修复的核心 —— 用户看不到日志就以为功能坏了。
-			log.Printf("[qoder-retry] %s；下次重试 %s", qoderRetrySummary(res),
+			log.Printf("[qoder-retry] %s；待签 %d 个；下次重试 %s", qoderRetrySummary(res), len(pending),
 				now.Add(qoderRetryInterval(now)).Format("15:04:05"))
 		}
 		run()

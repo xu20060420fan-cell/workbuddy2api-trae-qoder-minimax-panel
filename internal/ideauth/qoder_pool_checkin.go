@@ -79,9 +79,30 @@ const (
 // 每日活动只对「在 Qoder 客户端登录过（= 服务端给这个号发过 scope）」的账号
 // 下发，纯 API 签不到没下发的活动 —— 必须让用户在客户端里用这个号真登录一次。
 // 所以这里要直接把「下一步怎么做」写出来。
-const qoderPendingNotAssignedMsg = "服务端今天没有给本号下发每日额度（已核实：这份额度没有被号池里的其它账号领走）" +
-	"；多半是这个号的客户端登录身份过期了 —— 请点该号的「重新登录该号」，在 Qoder 客户端里用这个号扫码登录一次，" +
-	"服务端会重新给它下发当日活动，之后面板就能自动签到"
+//
+// ⚠️ 2026-11-10 再实测（同款现象，QQ 号 11-10 又是 pending），把证据补齐：
+//
+//	① 客户端当前登录的就是这个号，且客户端凭证与号池快照**完全一致**
+//	   （同 token dt-qFFomh…、同 scope 7c3816b4…、同 uid 019f5974…）——
+//	   所以「面板用了旧凭证导致看不到活动」这个解释被排除；
+//	② 客户端 scope 桶与服务端 /api/v1/agents **交叉验证命中 4 个 runtimeId**
+//	   （与另一个能正常领号的号完全一样）—— 所以「这个 scope 在服务端没注册过」
+//	   也被排除；
+//	③ 另一个号今天那条活动（act-20261109-955，窗口 11-10 10:00 ~ 11-11 09:59）
+//	   用**本号**凭证去查 GET /sash/api/v1/me/campaigns/{cid}/reward ⇒
+//	   GRANT_NOT_FOUND（不是 BLOCKED + SAME_PERSON_ALREADY_CLAIMED）。
+//	   ⇒ 服务端对**这个号压根没建 grant**：不是被同人领走，也不是令牌问题，
+//	   而是上游今天没给这个号下发每日活动（资格/灰度/风控层面，面板无法自愈）。
+//
+// 所以文案里「重新登录」只能是**其中一种**可能的下一步，不能写成唯一解；
+// 要同时给出「先在客户端活动页确认 / 再重新登录 / 面板会自动重试」三步，
+// 免得用户以为点一次按钮就一定能成。
+const qoderPendingNotAssignedMsg = "服务端今天没有给本号下发每日额度（已核实：这份额度没有被号池里的其它账号领走，" +
+	"上游连这条活动的领取记录都没给本号建）" +
+	"；这属于上游未给本号下发，不是面板取不到凭证。" +
+	"可先在 Qoder 客户端的活动页确认该号今天是否真的可领；" +
+	"若客户端也看不到，就点该号的「重新登录该号」用这个号扫码登录一次，让服务端重新给它下发当日活动；" +
+	"下发后 30 分钟内面板会自动领取"
 
 // qoderPendingUnknownMsg 证据不足时的 pending 说明（未探测出任何同人结论）。
 const qoderPendingUnknownMsg = "未观察到今日签到活动（Qoder 每天 10:00 后下发；后台会自动重试）"
@@ -1852,6 +1873,37 @@ func QoderPoolScan(emails []string) []QoderScanAccount {
 		r.Strategy = qoderStrategySnapshot(r.Email, r.Phase, r.QuotaTakenBy, r.QuotaGroup, verdictByEmail[key], probeConclusion)
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Email < out[j].Email })
+	return out
+}
+
+// QoderPendingEmails 列出号池里今天**还没领到**每日额度的账号邮箱。
+//
+// 用途：后台「延迟下发自动补签」的输入 —— 上游每日活动是 **10:00 (UTC+8) 才下发**，
+// 而且**不是所有号都会同时拿到**（实测 2026-11-10：gmail 号 10:00 准时拿到并领到，
+// 另一个号整天 campaigns 里都没有当天的 CLAIM_BENEFIT）。所以「现在没领到」
+// 不等于「今天没得领」—— 可能只是上游晚点才给这个号建 grant。
+//
+// 判定口径与面板显示完全一致（都来自 QoderPoolScan）：
+//   - phase != claimed / already → 还需要领；
+//   - phase == claimed 但 checked_in_today=false → 是同人的另一个号领走了，本号
+//     今天本来就没有自己的一份（重扫也没用），排除掉。
+func QoderPendingEmails() []string {
+	rows := QoderPoolScan(nil)
+	var out []string
+	for _, r := range rows {
+		if r.Phase == QoderPhaseClaimed && r.CheckedInToday {
+			continue
+		}
+		// 同人已领：额度被同组另一个号拿走了，本号重扫没有意义。
+		if r.QuotaTakenBy != "" {
+			continue
+		}
+		if strings.TrimSpace(r.Email) == "" {
+			continue
+		}
+		out = append(out, r.Email)
+	}
+	sort.Strings(out)
 	return out
 }
 
