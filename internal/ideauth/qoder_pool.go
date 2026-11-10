@@ -324,6 +324,25 @@ func qoderSnapshotEmail(a *QoderSnapshot) string {
 	return ""
 }
 
+// qoderSnapshotUID 取快照的账号 uid。
+//
+// 用途：设备身份要按**账号**派生（runtime-info 的 stdin 传 {"account":"<uid>"}），
+// 见 QoderDeviceForAccount2 / qoderRunRuntimeInfo。
+func qoderSnapshotUID(a *QoderSnapshot) string {
+	if a == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(a.UserID); id != "" {
+		return id
+	}
+	if a.Auth != nil {
+		if id := strings.TrimSpace(a.Auth.User.ID); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
 // QoderQuotaGroups 按**同一人组**分组：组键 → 组内账号邮箱列表。
 //
 // 组内账号都是服务端判定过「同一个人」的（见 qoder_person.go）；没判定过的

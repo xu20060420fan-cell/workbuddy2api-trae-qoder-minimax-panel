@@ -3,6 +3,7 @@ package ideauth
 import (
 	"encoding/json"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -97,12 +98,114 @@ const (
 // 所以文案里「重新登录」只能是**其中一种**可能的下一步，不能写成唯一解；
 // 要同时给出「先在客户端活动页确认 / 再重新登录 / 面板会自动重试」三步，
 // 免得用户以为点一次按钮就一定能成。
+//
+// ⚠️⚠️ 2026-11-10 12:50 真根因找到 —— **上面那条「上游没给本号下发」的结论是错的**：
+//
+//	用 Electron 的 `--log-net-log` 抓到客户端**运行时真实请求头**，发现客户端
+//	带的机器指纹与面板算出来的**不是同一套**：
+//	  客户端：cosy-machinetoken P1gAKOje… / cosy-machinecode 734d3208761d6beb78
+//	        / cosy-machinetype 5ad24b711471b1b3bc
+//	  面板：  cosy-machinetoken P1gAOjr… / cosy-machinecode 8e7c7ed176b4fcd67f
+//	        / cosy-machinetype 2a8670b014879fb556
+//
+//	根因：官方调用契约是 `runtime-info.exe <环境码> [--account-stdin]`，
+//	**国际版桌面端环境码 = 3**，stdin 传 `{"account":"<uid>"}`。
+//	面板旧代码既没传环境码、stdin 也是空的 ⇒ 拿到的是**国内版(prod)那套身份**。
+//
+//	实测（同一个号、同一份 token，只换机器身份）：
+//	  旧身份 → GET /sash/api/v1/me/campaigns 返回 claimable:false、
+//	           只剩一条早先的促销活动（当天每日额度**看不见**）；
+//	  新身份 → 立刻返回 claimable:true + act-20261109-955 / CLAIM_BENEFIT /
+//	           100 Credits / CLAIMABLE，POST claim 成功（grantId 01a1c3d1-…，
+//	           status CLAIMED，+100 Credits 到账）。
+//
+//	⇒ 上游按**设备身份**过滤每日额度：身份对不上就**静默**不下发
+//	  （不报错、不 401），所以此前一直误判成「上游没给这个号下发」。
+//	  修复见 qoderRunRuntimeInfo / QoderDeviceInfoFor。
+//
+//	所以现在 pending 的含义回到「**这台设备身份下没看到**当天额度」，
+//	而不是「上游没给这个号下发」。文案必须说清区别 —— 否则用户会去折腾
+//	重新登录（那个动作解决不了设备身份不匹配）。
 const qoderPendingNotAssignedMsg = "服务端今天没有给本号下发每日额度（已核实：这份额度没有被号池里的其它账号领走，" +
 	"上游连这条活动的领取记录都没给本号建）" +
 	"；这属于上游未给本号下发，不是面板取不到凭证。" +
 	"可先在 Qoder 客户端的活动页确认该号今天是否真的可领；" +
 	"若客户端也看不到，就点该号的「重新登录该号」用这个号扫码登录一次，让服务端重新给它下发当日活动；" +
 	"下发后 30 分钟内面板会自动领取"
+
+// qoderPendingDeviceMismatchMsg 设备身份与客户端不一致导致看不到额度时的说明。
+//
+// 触发条件：客户端**能看到**当天额度（有 claimable=true 的每日 CLAIM_BENEFIT），
+// 而面板这一侧看不到 —— 说明是面板的设备身份没对齐，不是上游没下发。
+//
+// ⚠️ 2026-11-10：这是本轮真正的 bug 形态。此前把它一律写成「上游未下发」，
+// 用户在客户端明明看到签到任务，面板却说没下发 —— 方向完全错了。
+const qoderPendingDeviceMismatchMsg = "客户端里能看到这个号的今日签到任务，但面板这一侧查不到：" +
+	"原因是面板使用的设备身份与 Qoder 客户端运行时的身份不一致（面板拿到的是另一套机器指纹），" +
+	"上游按设备身份过滤每日额度，身份对不上就会静默不下发（不报错、不 401）。" +
+	"已修复：面板现在按官方契约（国际版环境码 + 按账号 uid）取身份，与客户端一致。" +
+	"若仍显示未下发，请重启面板服务让新的设备身份生效"
+
+// qoderClientClaimableDaily 客户端当前登录号在**客户端身份**下是否能看到
+// 当天可领的每日额度（actionType=CLAIM_BENEFIT 且 claimStatus=CLAIMABLE）。
+//
+// 用途：区分「上游真没下发」与「面板设备身份对不上」——
+// 客户端能领、面板领不到 ⇒ 是身份问题，文案必须说清，否则用户会去折腾
+// 重新登录（那个动作解决不了设备身份不匹配）。
+//
+// 只对**客户端当前登录的账号**有意义（别的号客户端登录态里没有）。
+func qoderClientClaimableDaily(email string) bool {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return false
+	}
+	auth := QoderClientAuthFor(email)
+	if auth == nil {
+		return false
+	}
+	// 客户端身份：按官方契约取（国际版环境码）。
+	dev := QoderDeviceInfoFor(auth.User.ID, "intl")
+	if dev == nil {
+		return false
+	}
+	st, raw, err := QoderDo(qoderOpenAPIINTL, qoderPathCampaigns, http.MethodGet, auth.Token, nil, dev)
+	if err != nil || st != http.StatusOK {
+		return false
+	}
+	return qoderHasClaimableDaily(raw)
+}
+
+// qoderHasClaimableDaily 判断 campaigns 响应里有没有「当天可领的每日额度」。
+func qoderHasClaimableDaily(raw []byte) bool {
+	var resp struct {
+		Campaigns []struct {
+			ActionType string `json:"actionType"`
+			ClaimSt    string `json:"claimStatus"`
+		} `json:"campaigns"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return false
+	}
+	for _, c := range resp.Campaigns {
+		if c.ActionType == qoderClaimAction && strings.EqualFold(c.ClaimSt, "CLAIMABLE") {
+			return true
+		}
+	}
+	return false
+}
+
+// qoderPendingMsgFor 返回该号 pending 时应展示的说明。
+//
+// 判定顺序（2026-11-10）：
+//  1. 客户端当前登录的这个号在**客户端身份**下能看到当天可领额度 ⇒
+//     是面板设备身份不匹配，文案必须直说（而不是含糊说「上游没下发」）；
+//  2. 否则才是「上游确实没给本号下发」。
+func qoderPendingMsgFor(email string) string {
+	if qoderClientClaimableDaily(email) {
+		return qoderPendingDeviceMismatchMsg
+	}
+	return qoderPendingNotAssignedMsg
+}
 
 // qoderPendingUnknownMsg 证据不足时的 pending 说明（未探测出任何同人结论）。
 const qoderPendingUnknownMsg = "未观察到今日签到活动（Qoder 每天 10:00 后下发；后台会自动重试）"
@@ -298,7 +401,9 @@ func QoderCheckinPoolOrdered(emails []string, priority string) (*QoderCheckinPoo
 		}
 
 		// 按账号解析设备/出口（默认真实设备，行为与现网一致）。
-		dev, devErr := qoderDeviceForEmailSafe(email)
+		// uid 参与设备身份派生：上游按「设备身份」过滤每日额度，
+		// 身份对不上会静默不下发（2026-11-10 实测）。
+		dev, devErr := qoderDeviceForEmailSafe(email, qoderSnapshotUID(it.snap))
 		if devErr != nil {
 			verdicts[key] = QoderVerdictUnknown
 			out.Results = append(out.Results, QoderCheckinItem{
@@ -565,7 +670,7 @@ func QoderCheckinPoolOrdered(emails []string, priority string) (*QoderCheckinPoo
 			// 服务端明确说：本号与对方**不是同一个人**，今天这份额度不归本号，
 			// 也不是被对方抢走 —— 就是「服务端今天没给本号下发」。
 			p.res.Phase = QoderPhasePending
-			p.res.Msg = qoderPendingNotAssignedMsg
+			p.res.Msg = qoderPendingMsgFor(email)
 			p.res.CheckedInToday = false
 			p.res.QuotaTakenBy = ""
 		default:
@@ -1128,8 +1233,10 @@ func qoderIsGrantNotFound(msg string) bool {
 }
 
 // qoderDeviceForEmailSafe 按账号解析设备；配置损坏时回落真实设备（不阻断签到）。
-func qoderDeviceForEmailSafe(email string) (*QoderDevice, error) {
-	dev, err := QoderDeviceForEmail(email)
+//
+// uid = 该账号的 uid（用于按账号派生的设备身份，见 QoderDeviceForAccount2）。
+func qoderDeviceForEmailSafe(email string, uid string) (*QoderDevice, error) {
+	dev, err := QoderDeviceForAccount2(email, uid)
 	if err == nil && dev != nil {
 		return dev, nil
 	}
@@ -1592,7 +1699,7 @@ func QoderPoolScan(emails []string) []QoderScanAccount {
 				row.CheckedInAt = t.Format(time.RFC3339)
 			}
 			auth := cloneQoderAuth(snap.Auth)
-			dev, devErr := qoderDeviceForEmailSafe(email)
+			dev, devErr := qoderDeviceForEmailSafe(email, qoderSnapshotUID(snap))
 			if devErr != nil {
 				row.Phase = QoderPhaseError
 				row.Msg = "该账号设备/出口配置不可用：" + devErr.Error()
@@ -1809,7 +1916,7 @@ func QoderPoolScan(emails []string) []QoderScanAccount {
 				qoderForgetPersonLinkIfContradicted(em, other, QoderVerdictOther)
 				r.DeviceQuotaUsed = false
 				r.QuotaTakenBy = ""
-				r.Msg = qoderPendingNotAssignedMsg
+				r.Msg = qoderPendingMsgFor(em)
 				verdictByEmail[em] = QoderVerdictOther
 			}
 			break

@@ -184,13 +184,48 @@ func qoderInstallBases() []string {
 }
 
 // qoderRunRuntimeInfo 运行 runtime-info.exe 取机器指纹。
-func qoderRunRuntimeInfo(exe string) map[string]any {
+//
+// ⚠️ 2026-11-10 修正（关键，之前一直用错，导致「客户端有签到任务、面板显示未下发」）：
+//
+//	官方调用契约是 `runtime-info.exe <环境码> [--account-stdin]`：
+//	  - 环境码：**国际版桌面端 = 3**、国内版 = 0、CLI = 4；
+//	  - stdin：`{"account":"<uid>"}\n`（win32/darwin）。
+//
+//	**决定性因素是环境码**（实测 env=3 与 env=0 派生出两套完全不同的身份；
+//	同一环境码下 uid 传不传、传哪个都一样 —— 身份是机器级的）。
+//	旧实现既没传环境码、stdin 也是空的 ⇒ 拿到的是**国内版(prod 默认)那套身份**，
+//	而客户端运行时用的是国际版环境码 3 派生的那套。
+//
+//	实测（net-log 抓客户端真实请求头确认）：
+//	  用旧身份 → GET /sash/api/v1/me/campaigns 返回 claimable:false、
+//	    只剩一条早先的促销活动（当天每日额度**看不见**）；
+//	  用客户端同一套身份 → 立刻返回 claimable:true +
+//	    act-20261109-955 / CLAIM_BENEFIT / 100 Credits / CLAIMABLE，
+//	    并成功领到（grantId 01a1c3d1-…，status CLAIMED）。
+//
+//	即：**上游按「设备身份」过滤每日额度**，身份对不上就静默不下发 ——
+//	不报错、不 401，所以此前一直误判成「上游没给这个号下发」。
+//
+// 参数：
+//   - env：环境码字符串（"3" = 国际版桌面端；"0" = 国内版）；
+//   - account：账号 uid（官方契约要求随账号调用；实测不影响身份派生，
+//     仍按官方写法传，避免与客户端调用形态不一致）。
+func qoderRunRuntimeInfo(exe, env, account string) map[string]any {
 	if exe == "" {
 		return nil
 	}
-	cmd := exec.Command(exe, "--account-stdin")
+	args := []string{}
+	if env != "" {
+		args = append(args, env)
+	}
+	stdin := ""
+	if account != "" {
+		args = append(args, "--account-stdin")
+		stdin = `{"account":"` + account + `"}` + "\n"
+	}
+	cmd := exec.Command(exe, args...)
 	cmd.Dir = filepath.Dir(exe)
-	cmd.Stdin = bytes.NewReader(nil)
+	cmd.Stdin = strings.NewReader(stdin)
 	hideWindow(cmd)
 	type res struct {
 		b   []byte
@@ -222,9 +257,17 @@ func qoderRunRuntimeInfo(exe string) map[string]any {
 }
 
 // QoderDeviceInfo 组装完整设备指纹。
-func QoderDeviceInfo() *QoderDevice {
+//
+// account = 账号 uid（用于按账号派生的设备身份；空 = 机器级身份）。
+// realm = "intl"（国际版 openapi.qoder.sh）或 "cn"（国内版 openapi.qoder.com.cn）。
+//
+// ⚠️ 2026-11-10：环境码必须按区域给对（国际版=3 / 国内版=0），
+// 且 stdin 要带账号 uid —— 否则拿到的是另一套身份，上游会**静默过滤掉**
+// 当天的每日额度（详见 qoderRunRuntimeInfo 的注释）。
+func QoderDeviceInfoFor(account, realm string) *QoderDevice {
 	exe := QoderRuntimeInfoExe()
-	ri := qoderRunRuntimeInfo(exe)
+	env := qoderRuntimeInfoEnv(realm)
+	ri := qoderRunRuntimeInfo(exe, env, account)
 	str := func(k string) string {
 		if ri == nil {
 			return ""
@@ -257,6 +300,20 @@ func QoderDeviceInfo() *QoderDevice {
 		}
 	}
 	return d
+}
+
+// qoderRuntimeInfoEnv runtime-info.exe 的环境码。
+// 官方桌面端：国际版 = 3、国内版 = 0（CLI = 4）。给错会派生出另一套身份。
+func qoderRuntimeInfoEnv(realm string) string {
+	if strings.EqualFold(strings.TrimSpace(realm), "cn") {
+		return "0"
+	}
+	return "3"
+}
+
+// QoderDeviceInfo 组装**机器级**设备指纹（不绑定账号）。
+func QoderDeviceInfo() *QoderDevice {
+	return QoderDeviceInfoFor("", "intl")
 }
 
 func hostname() string {
@@ -1221,13 +1278,26 @@ func qoderCampaignsOf(raw []byte) []QoderCampaign {
 // 出口代理只写入 dev.ProxyURL，由 NewHTTPClient/QoderDo 应用；本函数不发起网络请求。
 // 配置文件损坏时返回错误（由调用方决定是否降级），不静默改配置。
 func QoderDeviceForEmail(email string) (*QoderDevice, error) {
+	return QoderDeviceForAccount2(email, "")
+}
+
+// QoderDeviceForAccount2 按账号解析设备指纹。
+//
+// uid = 该账号的 uid（QoderSnapshot.UserID）；用于让 runtime-info 按**账号**
+// 派生身份（官方契约：stdin 传 {"account":"<uid>"}）。
+// realm = "intl" / "cn"。
+//
+// ⚠️ 2026-11-10：设备身份必须与**客户端运行时**用的那套一致，
+// 否则上游会静默过滤掉当天的每日额度（不报错、不 401，
+// 表现成「客户端里有签到任务、面板说没下发」）。详见 qoderRunRuntimeInfo。
+func QoderDeviceForAccount2(email, uid string) (*QoderDevice, error) {
 	pool, err := LoadQoderEgress()
 	if err != nil {
 		return nil, err
 	}
 	prof := qoderEgressProfileOf(pool, email)
 	proxy := strings.TrimSpace(prof.ProxyURL)
-	base := QoderDeviceInfo()
+	base := QoderDeviceInfoFor(uid, "intl")
 	if base == nil {
 		base = &QoderDevice{}
 	}
@@ -1298,14 +1368,15 @@ func qoderSHA256(s string) []byte {
 // 显式配置 derived 时才使用派生设备。读取配置失败一律回落到真实设备 ——
 // 签到是无人值守路径，不能因为一个坏掉的配置文件全部失败。
 func qoderDeviceForAccount(auth *QoderAuth) *QoderDevice {
-	email := ""
+	email, uid := "", ""
 	if auth != nil {
 		email = auth.User.Email
+		uid = auth.User.ID
 	}
-	if dev, err := QoderDeviceForEmail(email); err == nil && dev != nil {
+	if dev, err := QoderDeviceForAccount2(email, uid); err == nil && dev != nil {
 		return dev
 	}
-	dev := QoderDeviceInfo()
+	dev := QoderDeviceInfoFor(uid, "intl")
 	if dev == nil {
 		dev = &QoderDevice{}
 	}
