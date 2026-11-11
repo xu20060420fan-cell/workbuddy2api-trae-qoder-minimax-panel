@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -265,9 +266,18 @@ func qoderRunRuntimeInfo(exe, env, account string) map[string]any {
 // 且 stdin 要带账号 uid —— 否则拿到的是另一套身份，上游会**静默过滤掉**
 // 当天的每日额度（详见 qoderRunRuntimeInfo 的注释）。
 func QoderDeviceInfoFor(account, realm string) *QoderDevice {
+	return QoderDeviceInfoForEnvCode(account, qoderRuntimeInfoEnv(realm))
+}
+
+// QoderDeviceInfoForEnvCode 按 runtime-info 的**环境码**取设备指纹。
+//
+// env: "3" = 国际版桌面端；"0" = 国内版。不同账号可能属于不同环境
+// （实测同一台机器上，两个 Qoder 号一个只认 3、另一个只认 0），
+// 所以环境码必须按账号选，不能全局写死。
+func QoderDeviceInfoForEnvCode(account, env string) *QoderDevice {
 	exe := QoderRuntimeInfoExe()
-	env := qoderRuntimeInfoEnv(realm)
-	ri := qoderRunRuntimeInfo(exe, env, account)
+	env = qoderRuntimeEnvOrDefault(env)
+	ri := qoderRunRuntimeInfoCached(exe, env, account)
 	str := func(k string) string {
 		if ri == nil {
 			return ""
@@ -309,6 +319,48 @@ func qoderRuntimeInfoEnv(realm string) string {
 		return "0"
 	}
 	return "3"
+}
+
+// qoderRuntimeEnvOrDefault 规范化环境码：只认 "0" / "3"，空值回落国际版 "3"。
+func qoderRuntimeEnvOrDefault(env string) string {
+	if strings.TrimSpace(env) == "0" {
+		return "0"
+	}
+	return "3"
+}
+
+// qoderAltRuntimeEnv 返回另一个环境码（3 ↔ 0），用于按账号自动探测。
+func qoderAltRuntimeEnv(env string) string {
+	if qoderRuntimeEnvOrDefault(env) == "0" {
+		return "3"
+	}
+	return "0"
+}
+
+// runtime-info 指纹是机器级、且在客户端运行期间稳定；缓存 10 分钟，
+// 避免每次扫描都 spawn 一次 runtime-info.exe（单次约 3-4 秒，是面板加载慢的主因）。
+var qoderRuntimeInfoCache sync.Map
+
+type qoderRuntimeInfoCacheEntry struct {
+	raw map[string]any
+	at  time.Time
+}
+
+func qoderRunRuntimeInfoCached(exe, env, account string) map[string]any {
+	if exe == "" {
+		return nil
+	}
+	key := exe + "\x00" + env
+	if v, ok := qoderRuntimeInfoCache.Load(key); ok {
+		if e, ok := v.(qoderRuntimeInfoCacheEntry); ok && time.Since(e.at) < 10*time.Minute {
+			return e.raw
+		}
+	}
+	raw := qoderRunRuntimeInfo(exe, env, account)
+	if raw != nil {
+		qoderRuntimeInfoCache.Store(key, qoderRuntimeInfoCacheEntry{raw: raw, at: time.Now()})
+	}
+	return raw
 }
 
 // QoderDeviceInfo 组装**机器级**设备指纹（不绑定账号）。
@@ -1102,9 +1154,12 @@ type QoderUsageResult struct {
 	PlanTierName string      `json:"plan_tier_name"`
 	PackageQuota *QoderQuota `json:"user_quota,omitempty"`   // 套餐内 Credits
 	AddOnQuota   *QoderQuota `json:"add_on_quota,omitempty"` // 附加 / 签到 Credits
-	Base         string      `json:"base,omitempty"`
-	Phase        string      `json:"phase,omitempty"` // ok / login_required / error
-	Msg          string      `json:"msg,omitempty"`
+	// ExpiresAtMs 上游 usage 返回的顶层到期时间（毫秒）。
+	// 实测 253402214400000 = 9999-12-31，表示长期有效 / 不过期。
+	ExpiresAtMs int64  `json:"expires_at_ms,omitempty"`
+	Base        string `json:"base,omitempty"`
+	Phase       string `json:"phase,omitempty"` // ok / login_required / error
+	Msg         string `json:"msg,omitempty"`
 }
 
 // QoderUsage 查询当前登录账号的积分额度（GET {base}/api/v1/me/usage）。
@@ -1145,6 +1200,7 @@ func qoderUsageAuth(auth *QoderAuth, dev *QoderDevice, scope string) *QoderUsage
 		var m struct {
 			PlanTier     string      `json:"plan_tier"`
 			PlanTierName string      `json:"plan_tier_name"`
+			ExpiresAt    int64       `json:"expires_at"`
 			UserQuota    *QoderQuota `json:"user_quota"`
 			AddOnQuota   *QoderQuota `json:"add_on_quota"`
 		}
@@ -1154,16 +1210,19 @@ func qoderUsageAuth(auth *QoderAuth, dev *QoderDevice, scope string) *QoderUsage
 				Data struct {
 					PlanTier     string      `json:"plan_tier"`
 					PlanTierName string      `json:"plan_tier_name"`
+					ExpiresAt    int64       `json:"expires_at"`
 					UserQuota    *QoderQuota `json:"user_quota"`
 					AddOnQuota   *QoderQuota `json:"add_on_quota"`
 				} `json:"data"`
 			}
 			if json.Unmarshal(raw, &wrap) == nil {
-				m.PlanTier, m.PlanTierName, m.UserQuota, m.AddOnQuota = wrap.Data.PlanTier, wrap.Data.PlanTierName, wrap.Data.UserQuota, wrap.Data.AddOnQuota
+				m.PlanTier, m.PlanTierName, m.ExpiresAt = wrap.Data.PlanTier, wrap.Data.PlanTierName, wrap.Data.ExpiresAt
+				m.UserQuota, m.AddOnQuota = wrap.Data.UserQuota, wrap.Data.AddOnQuota
 			}
 		}
 		res.Base = base
 		res.PlanTier, res.PlanTierName = m.PlanTier, m.PlanTierName
+		res.ExpiresAtMs = m.ExpiresAt
 		res.PackageQuota, res.AddOnQuota = m.UserQuota, m.AddOnQuota
 		res.Phase = "ok"
 		return res
@@ -1291,13 +1350,20 @@ func QoderDeviceForEmail(email string) (*QoderDevice, error) {
 // 否则上游会静默过滤掉当天的每日额度（不报错、不 401，
 // 表现成「客户端里有签到任务、面板说没下发」）。详见 qoderRunRuntimeInfo。
 func QoderDeviceForAccount2(email, uid string) (*QoderDevice, error) {
+	return QoderDeviceForAccountEnv(email, uid, "3")
+}
+
+// QoderDeviceForAccountEnv 同 QoderDeviceForAccount2，但显式指定 runtime-info
+// 环境码（"3" 国际版 / "0" 国内版）。同一台机器上的不同 Qoder 号可能属于
+// 不同环境，必须按账号传入，不能全局写死。
+func QoderDeviceForAccountEnv(email, uid, env string) (*QoderDevice, error) {
 	pool, err := LoadQoderEgress()
 	if err != nil {
 		return nil, err
 	}
 	prof := qoderEgressProfileOf(pool, email)
 	proxy := strings.TrimSpace(prof.ProxyURL)
-	base := QoderDeviceInfoFor(uid, "intl")
+	base := QoderDeviceInfoForEnvCode(uid, env)
 	if base == nil {
 		base = &QoderDevice{}
 	}

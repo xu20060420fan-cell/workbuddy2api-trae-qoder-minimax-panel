@@ -126,12 +126,9 @@ const (
 //	所以现在 pending 的含义回到「**这台设备身份下没看到**当天额度」，
 //	而不是「上游没给这个号下发」。文案必须说清区别 —— 否则用户会去折腾
 //	重新登录（那个动作解决不了设备身份不匹配）。
-const qoderPendingNotAssignedMsg = "服务端今天没有给本号下发每日额度（已核实：这份额度没有被号池里的其它账号领走，" +
-	"上游连这条活动的领取记录都没给本号建）" +
-	"；这属于上游未给本号下发，不是面板取不到凭证。" +
-	"可先在 Qoder 客户端的活动页确认该号今天是否真的可领；" +
-	"若客户端也看不到，就点该号的「重新登录该号」用这个号扫码登录一次，让服务端重新给它下发当日活动；" +
-	"下发后 30 分钟内面板会自动领取"
+const qoderPendingNotAssignedMsg = "当前两套设备身份（国际版环境码 3 / 国内版环境码 0）下都没有看到本号的今日每日额度；" +
+	"已核实：这份额度没有被号池里的其它账号领走。" +
+	"面板会在后台自动重试；若 Qoder 客户端里能看到该号的任务，请检查该号的设备/出口配置。"
 
 // qoderPendingDeviceMismatchMsg 设备身份与客户端不一致导致看不到额度时的说明。
 //
@@ -143,8 +140,7 @@ const qoderPendingNotAssignedMsg = "服务端今天没有给本号下发每日�
 const qoderPendingDeviceMismatchMsg = "客户端里能看到这个号的今日签到任务，但面板这一侧查不到：" +
 	"原因是面板使用的设备身份与 Qoder 客户端运行时的身份不一致（面板拿到的是另一套机器指纹），" +
 	"上游按设备身份过滤每日额度，身份对不上就会静默不下发（不报错、不 401）。" +
-	"已修复：面板现在按官方契约（国际版环境码 + 按账号 uid）取身份，与客户端一致。" +
-	"若仍显示未下发，请重启面板服务让新的设备身份生效"
+	"面板现在会按账号自动尝试国际版/国内版两套环境码；若仍不一致，请检查该号的设备/出口配置"
 
 // qoderClientClaimableDaily 客户端当前登录号在**客户端身份**下是否能看到
 // 当天可领的每日额度（actionType=CLAIM_BENEFIT 且 claimStatus=CLAIMABLE）。
@@ -163,16 +159,22 @@ func qoderClientClaimableDaily(email string) bool {
 	if auth == nil {
 		return false
 	}
-	// 客户端身份：按官方契约取（国际版环境码）。
-	dev := QoderDeviceInfoFor(auth.User.ID, "intl")
-	if dev == nil {
-		return false
+	// 客户端身份：环境码按账号自动试（3 国际版 / 0 国内版）。
+	// 同一台机器上的不同 Qoder 号可能属于不同环境，写死一个会把另一个号判成「未下发」。
+	for _, env := range []string{"3", "0"} {
+		dev := QoderDeviceInfoForEnvCode(auth.User.ID, env)
+		if dev == nil {
+			continue
+		}
+		st, raw, err := QoderDo(qoderOpenAPIINTL, qoderPathCampaigns, http.MethodGet, auth.Token, nil, dev)
+		if err != nil || st != http.StatusOK {
+			continue
+		}
+		if qoderHasClaimableDaily(raw) {
+			return true
+		}
 	}
-	st, raw, err := QoderDo(qoderOpenAPIINTL, qoderPathCampaigns, http.MethodGet, auth.Token, nil, dev)
-	if err != nil || st != http.StatusOK {
-		return false
-	}
-	return qoderHasClaimableDaily(raw)
+	return false
 }
 
 // qoderHasClaimableDaily 判断 campaigns 响应里有没有「当天可领的每日额度」。
@@ -342,7 +344,7 @@ func QoderCheckinPoolOrdered(emails []string, priority string) (*QoderCheckinPoo
 	verdicts := make(map[string]string, len(items))
 	// 号池回写补丁（token 轮换 / ClaimCID）。全部通过 UpdateQoderPool 落盘。
 	type poolPatch struct {
-		access, refresh, claimCID string
+		access, refresh, claimCID, runtimeEnv string
 	}
 	patches := map[string]poolPatch{}
 
@@ -403,7 +405,8 @@ func QoderCheckinPoolOrdered(emails []string, priority string) (*QoderCheckinPoo
 		// 按账号解析设备/出口（默认真实设备，行为与现网一致）。
 		// uid 参与设备身份派生：上游按「设备身份」过滤每日额度，
 		// 身份对不上会静默不下发（2026-11-10 实测）。
-		dev, devErr := qoderDeviceForEmailSafe(email, qoderSnapshotUID(it.snap))
+		snapEnv := qoderSnapshotRuntimeEnv(it.snap)
+		dev, devErr := qoderDeviceForEmailSafeEnv(email, qoderSnapshotUID(it.snap), qoderRuntimeEnvOrDefault(snapEnv))
 		if devErr != nil {
 			verdicts[key] = QoderVerdictUnknown
 			out.Results = append(out.Results, QoderCheckinItem{
@@ -450,6 +453,41 @@ func QoderCheckinPoolOrdered(emails []string, priority string) (*QoderCheckinPoo
 		res.Email = firstNonEmpty(email, res.Email)
 		res.Scope = scope
 		res.QuotaGroup = groupSize[key]
+
+		// 环境码兜底：当前环境看不到当天活动时，换另一个环境码再签一次。
+		//
+		// 实测（2026-11-11）：同一台机器上的两个 Qoder 号，一个只认国际版
+		// 环境码 3、另一个只认国内版 0；旧代码把环境码写死成 3，于是后者
+		// 永远 pending，而客户端里明明有 100 Credits 可领。这里自动换码，
+		// 谁能看到活动就用谁，并把结果记进号池，后续不再重复探测。
+		if res.Phase == QoderPhasePending || (res.Phase == QoderPhaseFailed && qoderIsGrantNotFound(res.Msg)) {
+			alt := qoderAltRuntimeEnv(snapEnv)
+			if alt != qoderRuntimeEnvOrDefault(snapEnv) {
+				if altDev, altErr := qoderDeviceForEmailSafeEnv(email, qoderSnapshotUID(it.snap), alt); altErr == nil {
+					altRes, altAt, altRt := qoderCheckinAuth(auth, altDev, scope)
+					if altRes != nil {
+						switch altRes.Phase {
+						case QoderPhaseClaimed, QoderPhaseAlready, QoderPhaseBlocked:
+							if altAt == "" {
+								altAt = at
+							}
+							if altRt == "" {
+								altRt = rt
+							}
+							res, at, rt, dev = altRes, altAt, altRt, altDev
+							snapEnv = alt
+							it.snap.RuntimeEnv = alt
+							p := patches[key]
+							p.runtimeEnv = alt
+							patches[key] = p
+							res.Email = firstNonEmpty(email, res.Email)
+							res.Scope = scope
+							res.QuotaGroup = groupSize[key]
+						}
+					}
+				}
+			}
+		}
 
 		// 用的是客户端那份会话时，把客户端的 token 一并写回号池（下面统一落盘）。
 		if ca := clientFresh[key]; ca != nil {
@@ -526,6 +564,12 @@ func QoderCheckinPoolOrdered(emails []string, priority string) (*QoderCheckinPoo
 		verdicts[key] = directVerdict
 		item := qoderItemFromResult(it, res, rank, groupSize[key], probeConclusion, prevClaimed[key], directVerdict)
 		qoderApplyCheckinSideEffects(item, res)
+		if res.Phase == QoderPhaseClaimed && res.Credits > 0 {
+			// 只记录上游确认到账的；不把 pending/already 写成成功。
+			// 文案固定为「<邮箱> 邮箱实测成功」，避免「我的邮箱」「于 …」这类含糊说法。
+			log.Printf("[qoder] %s 邮箱实测成功：+%.0f Credits（环境码 %s，活动 %s，领取时刻 %s）",
+				email, res.Credits, qoderRuntimeEnvOrDefault(snapEnv), res.ClaimCID, res.ClaimedAt)
+		}
 		out.Results = append(out.Results, item)
 	}
 
@@ -865,6 +909,9 @@ func QoderCheckinPoolOrdered(emails []string, priority string) (*QoderCheckinPoo
 				}
 				if p.claimCID != "" {
 					a.ClaimCID = p.claimCID
+				}
+				if p.runtimeEnv != "" {
+					a.RuntimeEnv = p.runtimeEnv
 				}
 			}
 			return nil
@@ -1236,11 +1283,16 @@ func qoderIsGrantNotFound(msg string) bool {
 //
 // uid = 该账号的 uid（用于按账号派生的设备身份，见 QoderDeviceForAccount2）。
 func qoderDeviceForEmailSafe(email string, uid string) (*QoderDevice, error) {
-	dev, err := QoderDeviceForAccount2(email, uid)
+	return qoderDeviceForEmailSafeEnv(email, uid, "3")
+}
+
+// qoderDeviceForEmailSafeEnv 同 qoderDeviceForEmailSafe，但指定 runtime-info 环境码。
+func qoderDeviceForEmailSafeEnv(email, uid, env string) (*QoderDevice, error) {
+	dev, err := QoderDeviceForAccountEnv(email, uid, env)
 	if err == nil && dev != nil {
 		return dev, nil
 	}
-	fallback := QoderDeviceInfo()
+	fallback := QoderDeviceInfoForEnvCode(uid, env)
 	if fallback == nil {
 		fallback = &QoderDevice{}
 	}
@@ -1248,6 +1300,19 @@ func qoderDeviceForEmailSafe(email string, uid string) (*QoderDevice, error) {
 	// 配置读不出来时返回 fallback + 原始错误：调用方据此把该号标成 error，
 	// 而不是拿一个没有任何出口信息的设备偷偷去打上游。
 	return fallback, err
+}
+
+// qoderSnapshotRuntimeEnv 返回该账号已知的 runtime-info 环境码。
+// 空 = 尚未探测（调用方默认按国际版 "3" 打一次，再自动尝试另一个）。
+func qoderSnapshotRuntimeEnv(snap *QoderSnapshot) string {
+	if snap == nil {
+		return ""
+	}
+	v := strings.TrimSpace(snap.RuntimeEnv)
+	if v == "0" || v == "3" {
+		return v
+	}
+	return ""
 }
 
 // qoderItemName / qoderItemUID 从号池快照取展示字段。
@@ -1699,7 +1764,8 @@ func QoderPoolScan(emails []string) []QoderScanAccount {
 				row.CheckedInAt = t.Format(time.RFC3339)
 			}
 			auth := cloneQoderAuth(snap.Auth)
-			dev, devErr := qoderDeviceForEmailSafe(email, qoderSnapshotUID(snap))
+			env := qoderSnapshotRuntimeEnv(snap)
+			dev, devErr := qoderDeviceForEmailSafeEnv(email, qoderSnapshotUID(snap), qoderRuntimeEnvOrDefault(env))
 			if devErr != nil {
 				row.Phase = QoderPhaseError
 				row.Msg = "该账号设备/出口配置不可用：" + devErr.Error()
@@ -1710,6 +1776,31 @@ func QoderPoolScan(emails []string) []QoderScanAccount {
 			}
 			oc := qoderScanAuth(auth, dev, QoderQuotaScopeKey(snap))
 			res := oc.result
+			// 环境码兜底：同一台机器上的不同 Qoder 号可能属于不同环境
+			// （实测一个号只认 3、另一个只认 0）。当前环境看不到当天活动时，
+			// 换另一个环境码再**只读**核实一次；能看到就记住该号的环境码。
+			if res != nil && res.Phase == QoderPhasePending {
+				alt := qoderAltRuntimeEnv(env)
+				if alt != qoderRuntimeEnvOrDefault(env) {
+					if altDev, altErr := qoderDeviceForEmailSafeEnv(email, qoderSnapshotUID(snap), alt); altErr == nil {
+						if altOC := qoderScanAuth(auth, altDev, QoderQuotaScopeKey(snap)); altOC.result != nil {
+							switch altOC.result.Phase {
+							case "claimable", QoderPhaseClaimed, QoderPhaseAlready:
+								merged := altOC
+								if merged.newAccess == "" {
+									merged.newAccess = oc.newAccess
+								}
+								if merged.newRefresh == "" {
+									merged.newRefresh = oc.newRefresh
+								}
+								oc, res, dev = merged, altOC.result, altDev
+								snap.RuntimeEnv = alt
+								_ = updateQoderAccount(email, func(a *QoderSnapshot) { a.RuntimeEnv = alt })
+							}
+						}
+					}
+				}
+			}
 			// 续期出的新 token 写回号池（绝不写客户端登录态）。
 			// 必须走 UpdateQoderPool：裸 Load+Save 会覆盖并发写者的改动（契约 C-QD-POOL@1）。
 			if oc.newAccess != "" || oc.newRefresh != "" {
@@ -2031,7 +2122,12 @@ func QoderUsageFor(email string) *QoderUsageResult {
 		}
 		if strings.EqualFold(snap.Email, email) || strings.EqualFold(snap.Auth.User.Email, email) {
 			auth := cloneQoderAuth(snap.Auth)
-			return qoderUsageAuth(auth, qoderDeviceForAccount(auth), QoderQuotaScopeKey(snap))
+			env := qoderRuntimeEnvOrDefault(qoderSnapshotRuntimeEnv(snap))
+			dev, _ := qoderDeviceForEmailSafeEnv(snap.Email, qoderSnapshotUID(snap), env)
+			if dev == nil {
+				dev = qoderDeviceForAccount(auth)
+			}
+			return qoderUsageAuth(auth, dev, QoderQuotaScopeKey(snap))
 		}
 	}
 	return &QoderUsageResult{Phase: "error", Email: email, Msg: "号池里没有该账号"}

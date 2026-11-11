@@ -4494,52 +4494,132 @@ async function loadPkIdea(quiet) {
   if (!st || !box) return;
   if (!quiet) { st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">查询中</span>'; box.innerHTML = ''; }
   try {
-    const [td, qd] = await Promise.all([
+    const [td, qd, qa] = await Promise.all([
       api('trae/credits').catch(() => null),
       api('ide/qoder/usage').catch(() => null),
+      api('ide/qoder/accounts').catch(() => null),
     ]);
     const tarr = (td && td.accounts) || [];
     const parts = [];
-    // Trae
+    const cardSub = s => '<div class="sub">' + s + '</div>';
+
+    // Trae：与 WorkBuddy 同一套 pk-card / mixbar，不再用文字表格
     parts.push('<div class="pad"><div class="ck-group">Trae</div></div>');
     if (!tarr.length) {
       parts.push('<div class="state">未找到 Trae 账号。</div>');
     } else {
-      parts.push('<div class="tbl-wrap"><table class="acc"><thead><tr><th>账号</th><th>积分包</th><th>额度</th><th>已用</th><th>剩余</th><th>到期</th></tr></thead><tbody>');
-      for (const a of tarr) {
+      const cards = tarr.map(a => {
         const packs = a.packs || [];
         if (!packs.length) {
-          parts.push('<tr><td class="who"><div class="nm">' + esc(a.name || '未命名') + '</div><div class="id">' + esc(a.user_id || '') + '</div></td><td colspan="5"><span style="color:var(--ink-3)">' + (a.has_balance ? '无逐包明细' : '无法获取（凭证过期或接口异常）') + '</span></td></tr>');
-          continue;
+          return '<div class="pk-card"><div class="who"><span class="nm">' + esc(a.name || '未命名') +
+            '</span><span class="realm">Trae</span></div><div class="err">' +
+            (a.has_balance ? '无逐包明细' : '无法获取（凭证过期或接口异常）') + '</div></div>';
         }
-        let first = true;
+        let remain = 0, total = 0;
         for (const p of packs) {
-          const exp = p.end_time ? new Date(p.end_time * 1000).toLocaleDateString('zh-CN') : '—';
-          const lim = p.unlimited ? '不限量' : (p.limit || 0).toLocaleString('zh-CN');
-          const rem = p.unlimited ? '∞' : (p.remaining || 0).toLocaleString('zh-CN');
-          parts.push('<tr>' + (first ? '<td class="who" rowspan="' + packs.length + '"><div class="nm">' + esc(a.name || '未命名') + '</div><div class="id">' + esc(a.user_id || '') + '</div></td>' : '') +
-            '<td>' + esc(p.desc || '—') + '</td>' +
-            '<td class="num">' + lim + '</td>' +
-            '<td class="num">' + (p.used || 0) + '</td>' +
-            '<td class="num"><b>' + rem + '</b></td>' +
-            '<td class="num">' + exp + '</td></tr>');
-          first = false;
+          if (!p.unlimited) {
+            remain += Number(p.remaining || 0);
+            total += Number(p.limit || 0);
+          }
         }
-      }
-      parts.push('</tbody></table></div>');
+        // 同类积分包合并成一段（Trae 每天一个「签到奖励」包，30 个包逐条列图例会淹掉卡片）
+        const groups = [];
+        for (const p of packs) {
+          const key = String(p.desc || '积分包');
+          let g = groups.find(x => x.key === key);
+          if (!g) { g = { key, remain: 0, total: 0, n: 0, unlimited: false, end: 0 }; groups.push(g); }
+          g.n++;
+          g.remain += Number(p.remaining || 0);
+          g.total += Number(p.limit || 0);
+          if (p.unlimited) g.unlimited = true;
+          const t = Number(p.end_time || 0);
+          if (t && (!g.end || t < g.end)) g.end = t;
+        }
+        const sum = Math.max(1, remain);
+        const bar = groups.map((g, i) => {
+          const w = g.unlimited ? 0 : Math.max(0, g.remain);
+          const exp = g.end ? new Date(g.end * 1000).toLocaleDateString('zh-CN') : '不过期';
+          const tip = g.key + (g.n > 1 ? ' x' + g.n : '') + ' 剩余 ' +
+            (g.unlimited ? '∞' : fmtTok(w)) + ' · 到期 ' + exp;
+          return '<i style="width:' + (w / sum * 100).toFixed(2) + '%;background:' + pkColor(i) +
+            '" title="' + esc(tip) + '"></i>';
+        }).join('');
+        const legend = groups.map((g, i) => {
+          const rem = g.unlimited ? '∞' : fmtTok(g.remain);
+          const exp = g.end ? new Date(g.end * 1000).toLocaleDateString('zh-CN') : '不过期';
+          return '<span><i style="background:' + pkColor(i) + '"></i>' + esc(g.key) +
+            (g.n > 1 ? ' x' + g.n : '') + ' · 剩余 ' + rem + ' · 到期 ' + esc(exp) + '</span>';
+        }).join('');
+        const timed = packs.filter(p => p.end_time).sort((x, y) => Number(x.end_time) - Number(y.end_time));
+        const next = timed[0];
+        const gain = packs.find(p => /签到|checkin|daily/i.test(String(p.desc || '')));
+        const gainText = gain
+          ? '签到奖励：+' + (gain.unlimited ? '不限量' : fmtTok(Number(gain.limit || 0)) + ' Credits/天')
+          : '签到奖励：见积分包';
+        const expText = next
+          ? '最近到期：' + new Date(next.end_time * 1000).toLocaleDateString('zh-CN')
+          : '到期：不过期';
+        return '<div class="pk-card">' +
+          '<div class="who"><span class="nm">' + esc(a.name || 'Trae 账号') +
+          '</span><span class="realm">Trae</span></div>' +
+          '<div class="big">' + fmtTok(remain) + '</div>' +
+          cardSub('共 ' + fmtTok(total) + ' · ' + packs.length + ' 个包') +
+          '<div class="mixbar">' + bar + '</div>' +
+          '<div class="pk-legend">' + legend + '</div>' +
+          '<div class="note" style="margin-top:7px">' + gainText + ' · ' + expText + '</div>' +
+          '</div>';
+      }).join('');
+      parts.push('<div class="pk-grid">' + cards + '</div>');
     }
-    // Qoder
+
+    // Qoder：号池逐号查，条形展示套餐内 / 附加（签到）两组 Credits
     parts.push('<div class="pad"><div class="ck-group">Qoder</div></div>');
-    if (!qd || qd.phase !== 'ok') {
-      parts.push('<div class="state">' + esc((qd && qd.msg) || '未登录或无法读取 Qoder 额度') + '</div>');
+    const qarr = (qa && qa.accounts) || (qd && qd.email ? [{ email: qd.email, name: qd.name, current: true }] : []);
+    if (!qarr.length) {
+      parts.push('<div class="state">未找到 Qoder 账号。</div>');
     } else {
-      const pkg = qd.user_quota || {}, addon = qd.add_on_quota || {};
-      parts.push('<div class="tbl-wrap"><table class="acc"><thead><tr><th>账号</th><th>积分包</th><th>额度</th><th>已用</th><th>剩余</th><th>套餐</th></tr></thead><tbody>' +
-        '<tr><td class="who" rowspan="2"><div class="nm">' + esc(qd.name || '当前登录') + '</div><div class="id">' + esc(qd.email || '') + '</div></td>' +
-        '<td>套餐内 Credits</td><td class="num">' + (pkg.total || 0) + '</td><td class="num">' + (pkg.used || 0) + '</td><td class="num"><b>' + (pkg.remaining || 0) + '</b></td>' +
-        '<td rowspan="2">' + esc(qd.plan_tier_name || qd.plan_tier || '—') + '</td></tr>' +
-        '<tr><td>附加（签到）Credits</td><td class="num">' + (addon.total || 0) + '</td><td class="num">' + (addon.used || 0) + '</td><td class="num"><b>' + (addon.remaining || 0) + '</b></td></tr>' +
-        '</tbody></table></div>');
+      const usages = await Promise.all(qarr.map(a => {
+        if (a.current && qd && qd.phase === 'ok') return Promise.resolve(qd);
+        return api('ide/qoder/usage?email=' + encodeURIComponent(a.email || '')).catch(() => null);
+      }));
+      const cards = qarr.map((a, i) => {
+        const u = usages[i];
+        if (!u || u.phase !== 'ok') {
+          return '<div class="pk-card"><div class="who"><span class="nm">' +
+            esc(a.name || a.email || 'Qoder 账号') +
+            '</span><span class="realm">Qoder</span></div><div class="sub">' + esc(a.email || '') +
+            '</div><div class="err">' + esc((u && u.msg) || '额度查询失败') + '</div></div>';
+        }
+        const pkg = u.user_quota || {}, addon = u.add_on_quota || {};
+        const pkgRemain = Number(pkg.remaining || 0), addonRemain = Number(addon.remaining || 0);
+        const pkgUsed = Number(pkg.used || 0), addonUsed = Number(addon.used || 0);
+        const pkgTotal = Number(pkg.total || 0), addonTotal = Number(addon.total || 0);
+        const remain = pkgRemain + addonRemain;
+        const total = pkgTotal + addonTotal;
+        const sum = Math.max(1, remain);
+        const bar = '<i style="width:' + (pkgRemain / sum * 100).toFixed(2) +
+          '%;background:#4f8cff" title="套餐内 ' + fmtTok(pkgRemain) + '"></i>' +
+          '<i style="width:' + (addonRemain / sum * 100).toFixed(2) +
+          '%;background:#25b08b" title="附加/签到 ' + fmtTok(addonRemain) + '"></i>';
+        const legend = '<span><i style="background:#4f8cff"></i>套餐内 ' + fmtTok(pkgRemain) + '</span>' +
+          '<span><i style="background:#25b08b"></i>附加/签到 ' + fmtTok(addonRemain) + '</span>';
+        const expMs = Number(u.expires_at_ms || 0);
+        const expText = !expMs ? '到期：不过期（上游未设）' :
+          (new Date(expMs).getFullYear() >= 9999 ? '到期：不过期' :
+            '到期：' + new Date(expMs).toLocaleDateString('zh-CN'));
+        return '<div class="pk-card">' +
+          '<div class="who"><span class="nm">' + esc(a.name || a.email || 'Qoder 账号') + '</span>' +
+          (a.current ? '<span class="realm">当前</span>' : '<span class="realm">Qoder</span>') + '</div>' +
+          '<div class="sub">' + esc(a.email || '') + '</div>' +
+          '<div class="big">' + fmtTok(remain) + '</div>' +
+          cardSub('共 ' + fmtTok(total) + ' · 已用 ' + fmtTok(pkgUsed + addonUsed) + ' · ' +
+            esc(u.plan_tier_name || u.plan_tier || '—')) +
+          '<div class="mixbar">' + bar + '</div>' +
+          '<div class="pk-legend">' + legend + '</div>' +
+          '<div class="note" style="margin-top:7px">签到奖励：+100 Credits/日 · ' + expText + '</div>' +
+          '</div>';
+      }).join('');
+      parts.push('<div class="pk-grid">' + cards + '</div>');
     }
     box.innerHTML = parts.join('');
     st.hidden = true;
