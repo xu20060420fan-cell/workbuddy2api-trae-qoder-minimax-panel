@@ -566,7 +566,7 @@ func QoderCheckinPoolOrdered(emails []string, priority string) (*QoderCheckinPoo
 		qoderApplyCheckinSideEffects(item, res)
 		if res.Phase == QoderPhaseClaimed && res.Credits > 0 {
 			// 只记录上游确认到账的；不把 pending/already 写成成功。
-			// 文案固定为「<邮箱> 邮箱实测成功」，避免「我的邮箱」「于 …」这类含糊说法。
+			// 文案固定为「<邮箱> 邮箱实测成功」，直接写明是哪一个邮箱，不用含糊指代。
 			log.Printf("[qoder] %s 邮箱实测成功：+%.0f Credits（环境码 %s，活动 %s，领取时刻 %s）",
 				email, res.Credits, qoderRuntimeEnvOrDefault(snapEnv), res.ClaimCID, res.ClaimedAt)
 		}
