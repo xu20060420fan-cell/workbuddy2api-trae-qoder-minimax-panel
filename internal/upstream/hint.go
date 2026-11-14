@@ -139,10 +139,24 @@ func isInvalidImageData(body string) bool {
 
 // codeMarker JSON code 字段命中（`"code":N` / `"code": N` / `"code":"N"` 形态，
 // 与 IsModelBlocked 的 code 判定同容差口径）。lower 须为小写 body。
+//
+// 右边界：命中处之后不得紧跟数字——`"code":11135` 不能被 `"code":111350` 这类
+// 更长 code 前缀命中（与 reModelRateLimit 同款防撞车；Go regexp 不支持
+// lookahead，这里手动扫描出现位置并校验后继字符）。
 func codeMarker(lower, code string) bool {
 	for _, v := range []string{`"code":` + code, `"code": ` + code, `"code":"` + code + `"`, `"code": "` + code + `"`, `"code":" ` + code + `"`, `"code": '` + code + `'`} {
-		if strings.Contains(lower, v) {
-			return true
+		at := 0
+		for {
+			i := strings.Index(lower[at:], v)
+			if i < 0 {
+				break
+			}
+			i += at
+			at = i + 1
+			end := i + len(v)
+			if end >= len(lower) || lower[end] < '0' || lower[end] > '9' {
+				return true
+			}
 		}
 	}
 	return false

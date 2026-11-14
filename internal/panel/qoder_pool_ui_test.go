@@ -55,8 +55,9 @@ func TestQoderCheckinUIListsAllAccounts(t *testing.T) {
 	if !strings.Contains(loader, "renderQoderRows(rows, arr, cur, null)") {
 		t.Error("loadCkQoder 应先用 null 状态渲染骨架（renderQoderRows(rows, arr, cur, null)）")
 	}
-	if !strings.Contains(loader, "renderQoderRows(rows, arr, cur, st2)") {
-		t.Error("loadCkQoder 应在拿到 checkin-status 后重绘（renderQoderRows(rows, arr, cur, st2)）")
+	// 2026-11-14：设备身份（自动分配结果）并行取，渲染时一并带上。
+	if !strings.Contains(loader, "renderQoderRows(rows, arr, cur, st2, eg)") {
+		t.Error("loadCkQoder 应在拿到 checkin-status 后重绘并带上设备配置（renderQoderRows(rows, arr, cur, st2, eg)）")
 	}
 	// 骨架阶段不得猜「可签到/已签到」——状态没查到就显示占位。
 	if !strings.Contains(body, "查询中…") {
@@ -364,7 +365,12 @@ func TestQoderEgressEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 未配置时 GET 也要返回默认 real（前端要能对每个号做配置）。
+	// 未配置时 GET 也要返回默认 auto（前端要能对每个号做配置）。
+	//
+	// ⚠️ 2026-11-14 更正：这里原来断言的是 "real"。旧默认值 real 的后果是
+	// 号池里所有号共用同一台真实设备（用户诉求：「两个号肯定应该不一样」）。
+	// 现在默认 auto —— 由号池顺序自动分配（第一个号 real、其余 derived），
+	// effective_device_mode 字段给出展开后的实际生效值。
 	rec := httptest.NewRecorder()
 	p.qoderEgressGet(rec, httptest.NewRequest(http.MethodGet, "/panel/api/ide/qoder/egress", nil))
 	if rec.Code != http.StatusOK {
@@ -380,8 +386,11 @@ func TestQoderEgressEndpoints(t *testing.T) {
 	if !got.OK || len(got.Profiles) != 1 {
 		t.Fatalf("GET 应返回 1 个账号配置，实际 ok=%v profiles=%v", got.OK, got.Profiles)
 	}
-	if got.Profiles[0]["device_mode"] != "real" {
-		t.Errorf("未配置账号的 device_mode 应为 real，实际 %v", got.Profiles[0]["device_mode"])
+	if got.Profiles[0]["device_mode"] != "auto" {
+		t.Errorf("未配置账号的 device_mode 应为 auto（自动分配），实际 %v", got.Profiles[0]["device_mode"])
+	}
+	if got.Profiles[0]["effective_device_mode"] != "real" {
+		t.Errorf("号池第一个号的生效设备模式应为 real，实际 %v", got.Profiles[0]["effective_device_mode"])
 	}
 	if _, ok := got.Profiles[0]["last_probe"]; !ok {
 		t.Error("GET 必须返回 last_probe 字段（无结论时 null）")

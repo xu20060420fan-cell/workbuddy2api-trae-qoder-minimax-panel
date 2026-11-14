@@ -76,12 +76,11 @@ func qoderProbeReward(auth *QoderAuth, dev *QoderDevice, cid, scope string) Qode
 	if dev == nil {
 		dev = &QoderDevice{}
 	}
+	// 探测是只读契约（qoder_probe_classify.go 头注：不得触发 deviceToken/refresh
+	// —— refresh 会消费并轮换 refresh_token，而本函数不把轮换结果交回调用方，
+	// 等于把号池里的有效凭证烧掉，下一个续期周期必失败）。过期 token 一律按
+	// 401/判定路径走，续期交给签到/扫描/续期这三条带回写的主链路。
 	token := auth.Token
-	if qoderAuthExpired(auth) {
-		if nt, _, ok := qoderRefreshToken(auth, qoderOpenAPIBaseListForScope(scope)[0], dev); ok {
-			token = nt
-		}
-	}
 	for _, b := range qoderOpenAPIBaseListForScope(scope) {
 		st, raw, err := qoderDo(b, fmt.Sprintf(qoderPathReward, cid), http.MethodGet, token, nil, dev)
 		if err != nil {

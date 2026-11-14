@@ -1,6 +1,8 @@
 package ideauth
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,10 +24,27 @@ import (
 // 现网行为：真实设备指纹 + 进程默认网络。配置只在显式写入后生效，不改变成功路径。
 // ---------------------------------------------------------------------------
 
-// 设备模式枚举。契约 C-QD-EGRESS@1 只允许这两个值。
+// 设备模式枚举。契约 C-QD-EGRESS@1 只允许 real|derived。
+//
+// ⚠️ 2026-11-14 新增 auto（第三个值）：
+//
+//	用户诉求 —— 「设备是真实设备还是邮箱派生必须手动去调，应该自动生成，
+//	两个号肯定应该不一样」。手动配置在多号场景下既繁琐又容易配错
+//	（两个号都选 real = 同一台设备 = 上游按设备过滤时互相干扰）。
+//
+//	auto 的语义：**按号池顺序自动分配**
+//	  - 号池里**第一个**账号 → real（真实设备，与客户端运行时身份一致）；
+//	  - 其余账号 → derived（按邮箱确定性派生，跨进程稳定、彼此不同）。
+//
+//	这样「同一个号在任何时候都是同一套设备身份」（不随号池增删漂移，
+//	因为顺序取自号池文件里的账号顺序），且**任意两个号必然不同**。
+//
+//	用户显式写成 real / derived 的账号仍然尊重手动配置（手动优先于自动）。
 const (
 	QoderDeviceModeReal    = "real"
 	QoderDeviceModeDerived = "derived"
+	// QoderDeviceModeAuto 自动分配（real/derived 依号池顺序决定）。
+	QoderDeviceModeAuto = "auto"
 )
 
 // 出口配置校验失败的原因（供面板/探测按错误码展示，消息里带具体细节）。
@@ -119,7 +138,8 @@ func saveQoderEgressLocked(p *QoderEgressPool) error {
 		}
 		v.Email = em
 		if v.DeviceMode == "" {
-			v.DeviceMode = QoderDeviceModeReal
+			// 空 = 没配过 = 走自动分配（auto）。
+			v.DeviceMode = QoderDeviceModeAuto
 		}
 		profiles[em] = v
 	}
@@ -148,13 +168,17 @@ func QoderEgressFor(email string) QoderEgressProfile {
 	if pool, err := LoadQoderEgress(); err == nil {
 		return qoderEgressProfileOf(pool, email)
 	}
-	return QoderEgressProfile{Email: normalizeQoderEmail(email), DeviceMode: QoderDeviceModeReal}
+	return QoderEgressProfile{Email: normalizeQoderEmail(email), DeviceMode: QoderDeviceModeAuto}
 }
 
-// qoderEgressProfileOf 从配置池里取账号配置（无配置返回默认 real）。
+// qoderEgressProfileOf 从配置池里取账号配置（无配置返回默认 auto）。
+//
+// ⚠️ 2026-11-14：默认值从 real 改成 **auto** —— 之前默认 real 意味着
+// 号池里所有号共用同一台真实设备（用户诉求：「两个号肯定应该不一样」）。
+// auto 下由 QoderEffectiveDeviceMode 按号池顺序分配 real/derived。
 func qoderEgressProfileOf(pool *QoderEgressPool, email string) QoderEgressProfile {
 	key := normalizeQoderEmail(email)
-	def := QoderEgressProfile{Email: key, DeviceMode: QoderDeviceModeReal}
+	def := QoderEgressProfile{Email: key, DeviceMode: QoderDeviceModeAuto}
 	if pool == nil {
 		return def
 	}
@@ -166,7 +190,7 @@ func qoderEgressProfileOf(pool *QoderEgressPool, email string) QoderEgressProfil
 		prof.Email = key
 	}
 	if strings.TrimSpace(prof.DeviceMode) == "" {
-		prof.DeviceMode = QoderDeviceModeReal
+		prof.DeviceMode = QoderDeviceModeAuto
 	}
 	return prof
 }
@@ -210,15 +234,203 @@ func SetQoderEgress(email, mode, proxyURL, profileDir string) (*QoderEgressProfi
 	return &out, nil
 }
 
+// EnsureQoderEgress 自动补全号池里各账号的出口配置（幂等）。
+//
+// 照抄 CodeArts 的 EnsureSlot 模式（`internal/codearts/codearts.go:503`）：
+// **号池里每出现一个账号，就自动给它写一条 egress 条目**，用户零操作。
+//
+// 补全内容：
+//   - device_mode = auto（自动分配：号池第一个号 real，其余 derived）；
+//   - profile_dir = 按邮箱隔离的浏览器 profile 目录（自动生成，不手填）；
+//   - proxy_url 留空（没有代理资源时不该编一个）。
+//
+// 幂等：已有条目**不动**（尊重用户手改过的 device_mode / proxy_url），
+// 只补齐缺失的字段。用户显式保存过的配置永远优先。
+//
+// 返回补全了几条（用于日志）。
+func EnsureQoderEgress() (int, error) {
+	pool, err := LoadQoderPool()
+	if err != nil {
+		return 0, err
+	}
+	if pool == nil || len(pool.Accounts) == 0 {
+		return 0, nil
+	}
+	qoderEgressMu.Lock()
+	defer qoderEgressMu.Unlock()
+	eg, err := loadQoderEgressLocked()
+	if err != nil {
+		return 0, err
+	}
+	changed := 0
+	for _, a := range pool.Accounts {
+		if a == nil {
+			continue
+		}
+		email := normalizeQoderEmail(qoderSnapshotEmail(a))
+		if email == "" {
+			continue
+		}
+		prof, ok := eg.Profiles[email]
+		acctChanged := false
+		if !ok {
+			prof = QoderEgressProfile{Email: email}
+			acctChanged = true
+		} else {
+			prof.Email = email
+		}
+		if strings.TrimSpace(prof.DeviceMode) == "" {
+			prof.DeviceMode = QoderDeviceModeAuto
+			acctChanged = true
+		} else if prof.DeviceMode == QoderDeviceModeReal && qoderEgressLooksUntouched(prof, email) {
+			// 存量迁移（2026-11-14）：老版本默认就是 real，所以号池里每个号都被
+			// 写成了 real —— 这正是「两个号设备一样」的历史来源。
+			// 判定「用户没真改过」：没配代理 + profile 目录就是按邮箱自动生成的那个
+			// （目录名 = 邮箱短哈希）。这种条目迁移到 auto，由号池顺序决定
+			// 第一个号 real、其余 derived；配了代理或改过目录名的条目保持不动。
+			prof.DeviceMode = QoderDeviceModeAuto
+			prof.UpdatedAt = time.Now().Format(time.RFC3339)
+			acctChanged = true
+		}
+		if strings.TrimSpace(prof.ProfileDir) == "" {
+			// profile 目录的根路径由部署配置决定（config.json 旁边的 data/），
+			// ideauth 层不知道 —— 这里只写**目录名**（短哈希），
+			// 完整路径由面板层按自己的口径补全（见 ideauth.QoderProfileDirName）。
+			prof.ProfileDir = QoderProfileDirName(email)
+			acctChanged = true
+		}
+		eg.Profiles[email] = prof
+		if acctChanged {
+			changed++
+		}
+	}
+	if changed == 0 {
+		return 0, nil
+	}
+	if err := saveQoderEgressLocked(eg); err != nil {
+		return 0, err
+	}
+	return changed, nil
+}
+
+// ResetQoderEgressAuto 把号池里所有账号的设备模式重置为 auto（代理保持不变）。
+//
+// 用于「手动配乱了想回到自动分配」的一键操作。返回被改动的账号数。
+func ResetQoderEgressAuto() (int, error) {
+	pool, err := LoadQoderPool()
+	if err != nil {
+		return 0, err
+	}
+	if pool == nil || len(pool.Accounts) == 0 {
+		return 0, nil
+	}
+	qoderEgressMu.Lock()
+	defer qoderEgressMu.Unlock()
+	eg, err := loadQoderEgressLocked()
+	if err != nil {
+		return 0, err
+	}
+	changed := 0
+	now := time.Now().Format(time.RFC3339)
+	for _, a := range pool.Accounts {
+		if a == nil {
+			continue
+		}
+		email := normalizeQoderEmail(qoderSnapshotEmail(a))
+		if email == "" {
+			continue
+		}
+		prof, ok := eg.Profiles[email]
+		acctChanged := false
+		if !ok {
+			prof = QoderEgressProfile{Email: email}
+			acctChanged = true
+		}
+		prof.Email = email
+		if prof.DeviceMode != QoderDeviceModeAuto {
+			prof.DeviceMode = QoderDeviceModeAuto
+			prof.UpdatedAt = now
+			acctChanged = true
+		}
+		if strings.TrimSpace(prof.ProfileDir) == "" {
+			prof.ProfileDir = QoderProfileDirName(email)
+			acctChanged = true
+		}
+		eg.Profiles[email] = prof
+		if acctChanged {
+			changed++
+		}
+	}
+	if changed == 0 {
+		return 0, nil
+	}
+	if err := saveQoderEgressLocked(eg); err != nil {
+		return 0, err
+	}
+	return changed, nil
+}
+
+// qoderEgressLooksUntouched 判断一条出口配置是否「用户从未真正改过」。
+//
+// 判定条件（全部满足才算未改过）：
+//   - 没配代理（proxy_url 为空）—— 配了代理说明用户确实动过；
+//   - profile 目录是**按邮箱自动生成**的那个（目录名 = 邮箱短哈希）——
+//     改过目录名说明用户确实动过。
+//
+// 用途：存量迁移。老版本默认 device_mode=real，号池里所有号都被写成 real，
+// 导致「多个号共用同一台设备」。这类未改过的 real 条目迁移到 auto。
+func qoderEgressLooksUntouched(prof QoderEgressProfile, email string) bool {
+	if strings.TrimSpace(prof.ProxyURL) != "" {
+		return false
+	}
+	dir := strings.TrimSpace(prof.ProfileDir)
+	if dir == "" {
+		return true
+	}
+	base := filepath.Base(filepath.Clean(dir))
+	return strings.EqualFold(base, QoderProfileDirName(email))
+}
+
+// QoderDefaultProfileDir 返回某账号默认的浏览器 profile 目录。
+//
+// ⚠️ 完整路径的根目录由部署配置决定（config.json 旁边的 data/），ideauth 层
+// 拿不到 —— 所以本函数只返回**目录名**（短哈希），完整路径由面板层按自己的
+// 口径拼（见 panel.qoderWebProfileDir）。
+//
+// 之前 profile_dir 是手填字段，而运行时又被忽略（面板一律用自己的目录），
+// 两处口径不一致 → 这里统一：自动生成的值 = 面板运行时实际用的那个。
+func QoderDefaultProfileDir(email string) string {
+	return QoderProfileDirName(email)
+}
+
+// QoderProfileDirName 返回某账号浏览器 profile 的**目录名**（短哈希）。
+func QoderProfileDirName(email string) string {
+	key := normalizeQoderEmail(email)
+	if key == "" {
+		return ""
+	}
+	return qoderShortHash(key)
+}
+
+// qoderShortHash 是短哈希（与面板 shortHash 同算法：sha1 前 12 位）。
+func qoderShortHash(s string) string {
+	sum := sha1.Sum([]byte(s))
+	h := hex.EncodeToString(sum[:])
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
+}
+
 // normalizeQoderDeviceMode 校验并规范化设备模式。
 func normalizeQoderDeviceMode(mode string) (string, error) {
 	m := strings.ToLower(strings.TrimSpace(mode))
 	switch m {
-	case QoderDeviceModeReal, QoderDeviceModeDerived:
+	case QoderDeviceModeReal, QoderDeviceModeDerived, QoderDeviceModeAuto:
 		return m, nil
 	default:
-		return "", fmt.Errorf("%w: 只允许 %q 或 %q，收到 %q",
-			ErrInvalidDeviceMode, QoderDeviceModeReal, QoderDeviceModeDerived, mode)
+		return "", fmt.Errorf("%w: 只允许 %q / %q / %q，收到 %q",
+			ErrInvalidDeviceMode, QoderDeviceModeReal, QoderDeviceModeDerived, QoderDeviceModeAuto, mode)
 	}
 }
 

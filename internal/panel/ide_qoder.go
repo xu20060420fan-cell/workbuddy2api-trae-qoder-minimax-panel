@@ -61,6 +61,9 @@ func (p *Panel) qoderAdd(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "qoder_add_failed: "+err.Error())
 		return
 	}
+	// 新号进池后自动补全它的设备/出口配置（device_mode=auto + profile 目录），
+	// 用户不需要再手动去「设备/出口」弹窗里配一遍。
+	p.ensureQoderEgress()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":      true,
 		"added":   added,
@@ -68,6 +71,18 @@ func (p *Panel) qoderAdd(w http.ResponseWriter, r *http.Request) {
 		"name":    snap.Name,
 		"user_id": snap.UserID,
 	})
+}
+
+// ensureQoderEgress 自动补全号池各账号的出口配置（幂等，失败只记日志）。
+func (p *Panel) ensureQoderEgress() {
+	n, err := ideauth.EnsureQoderEgress()
+	if err != nil {
+		log.Printf("[qoder] 自动补全设备/出口配置失败（不影响签到）：%v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("[qoder] 自动补全设备/出口配置 %d 个账号（device_mode=auto，自动分配 real/derived）", n)
+	}
 }
 
 type qoderSwitchReq struct {
@@ -129,6 +144,9 @@ func (p *Panel) qoderRemove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "qoder_remove_failed: "+err.Error())
 		return
 	}
+	// 移除后号池顺序变了 —— 重新按新顺序补全（auto 模式下 real 会落到新的
+	// 第一个号上；用户手动配过的条目不受影响）。
+	p.ensureQoderEgress()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -512,19 +530,25 @@ func (p *Panel) qoderEgressGet(w http.ResponseWriter, r *http.Request) {
 			prof.Email = key
 		}
 		if strings.TrimSpace(prof.DeviceMode) == "" {
-			prof.DeviceMode = ideauth.QoderDeviceModeReal
+			prof.DeviceMode = ideauth.QoderDeviceModeAuto
 		}
 		dir := strings.TrimSpace(prof.ProfileDir)
 		if dir == "" {
 			dir = qoderWebProfileDir(p, prof.Email)
 		}
+		// effective_device_mode = **实际生效**的设备模式（auto 展开后的结果）。
+		// device_mode 保留配置原值（可能是 auto），前端据此显示「自动分配」，
+		// 而不是让用户以为自己手动选过。
+		effective := ideauth.QoderEffectiveDeviceMode(prof.Email, prof.DeviceMode)
 		profiles = append(profiles, map[string]any{
-			"email":       prof.Email,
-			"device_mode": prof.DeviceMode,
-			"proxy_url":   prof.ProxyURL,
-			"profile_dir": dir,
-			"updated_at":  prof.UpdatedAt,
-			"last_probe":  probe,
+			"email":                prof.Email,
+			"device_mode":          prof.DeviceMode,
+			"effective_device_mode": effective,
+			"auto_assigned":        prof.DeviceMode == ideauth.QoderDeviceModeAuto,
+			"proxy_url":            prof.ProxyURL,
+			"profile_dir":          dir,
+			"updated_at":           prof.UpdatedAt,
+			"last_probe":           probe,
 		})
 	}
 	for _, a := range accounts {
@@ -576,6 +600,18 @@ func (p *Panel) qoderEgressSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "profile": prof})
+}
+
+// qoderEgressResetAuto 一键把号池所有账号的设备模式恢复为「自动分配」。
+//
+// 代理配置保持不变（代理是用户手动配的资源，不该被这个操作清掉）。
+func (p *Panel) qoderEgressResetAuto(w http.ResponseWriter, r *http.Request) {
+	n, err := ideauth.ResetQoderEgressAuto()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "qoder_egress_reset_failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "changed": n})
 }
 
 func maskIfAny(s string) string {

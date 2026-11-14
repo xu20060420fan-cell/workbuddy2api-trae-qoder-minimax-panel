@@ -483,7 +483,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活 |
 | `schedule.blackcat_hours` | `[23]` | 每日本地时区整点夜猫子补足（23:00–08:00 计数窗口） |
 | `schedule.growth_hours` | `[1]` | 每日本地时区整点跑**成长任务队列**（第 6 类排程：扫描待办 → 排队执行 → 自动领奖；01:00 是因为 Sequential 族任务每日零点解锁） |
-| `schedule.ide_checkin_hours` | `[10]` | 每日本地时区整点**自动签到 IDE 号池**（Qoder / WorkBuddy / MiniMax 三个平台逐号签）。与主号池 `checkin_hours` 相互独立；此前这三个平台只有面板「一键签到」的手动入口，没有任何自动排程 |
+| `schedule.ide_checkin_hours` | `[9]` | 每日本地时区整点**自动签到 IDE 号池**（Qoder / WorkBuddy / MiniMax / 豆包四个平台逐号签）。与主号池 `checkin_hours` 相互独立；此前这些平台只有面板「一键签到」的手动入口，没有任何自动排程 |
 | `schedule.ide_checkin_enabled` | `true` | IDE 号池自动签到总开关；`false` = 只保留手动入口 |
 | `schedule.checkin_enabled` | `true` | 签到总开关；`false` 真正关闭 |
 | `schedule.travel_enabled` | `true` | 猫猫旅行总开关（独立于签到） |
@@ -506,7 +506,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `global.chat_base` / `global.billing_base` | 空 | 国际版上游地址覆盖（空 = 用内置默认） |
 | `trae.enabled` | `true` | Trae 通道总开关（关闭后不提供 `trae:` 前缀模型，也不拉 Trae 目录） |
 | `trae.data_dir` | 空 | Trae 客户端数据目录（留空 = 自动探测常见安装位置） |
-| `trae.auto_hours` | `[]` | Trae 自动签到的每日时点（本地时区整点，空 = 不自动签到） |
+| `trae.auto_hours` | `[9, 21]` | Trae 自动签到的每日时点（本地时区整点，空 / `[]` = 仅手动签到） |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
 | `prompt.mode` | `passthrough` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词）。**缺省是 `passthrough`**（对齐上游，保留客户端原始 system）；想要「从源头消灭 system 指纹误报」需显式设成 `custom` |
 | `prompt.file` | 空 | 提示词文件路径；空 = 内置默认（约 2KB）；路径非空但不可读 → 启动报错 |
@@ -542,7 +542,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 加载顺序：JSON 文件 → `WB2A_*` 环境变量（变量非空才覆盖）：
 
-`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
+`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
 
 ## 核心行为语义
 
@@ -661,7 +661,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 | 保活 | `schedule.keepalive_enabled` | `keepalive_hours` `[22]` 整点 | 全账号刷新 token；session 失效**连续 3 次**才自动禁用 |
 | 夜猫子 | `schedule.blackcat_enabled` | `blackcat_hours` `[23]` 整点 | **先查任务进度再决定**：`black_cat` 未达标才在 23:00–08:00 计数窗口内补足 glm-5.2 短对话（每天 1 次累计 3 天，漏跑次日窗口自动补） |
 | 成长任务队列 | `schedule.growth_enabled` | `growth_hours` `[1]` 整点 | 扫描全部账号成长任务待办 → 按账号排队执行（账号内串行，账号间并发 1-3）→ 进度落定后自动领奖；与面板「任务中心」同一套执行器 |
-| IDE 号池签到 | `schedule.ide_checkin_enabled` | `ide_checkin_hours` `[9]` 整点 | **Qoder / WorkBuddy / MiniMax 三个号池逐号签到**（各自用自己的 token，无需切号、无需客户端在线）；单平台失败不影响其它平台 |
+| IDE 号池签到 | `schedule.ide_checkin_enabled` | `ide_checkin_hours` `[9]` 整点 | **Qoder / WorkBuddy / MiniMax / 豆包四个号池逐号签到**（各自用自己的 token，无需切号、无需客户端在线）；单平台失败不影响其它平台 |
 | Trae 签到 | `trae.enabled` | `trae.auto_hours` `[9,21]` 整点 | Trae 账号签到（账号来自 Trae Work 助手的 `checkin_accounts.json`）；`auto_hours` 为空 = 仅手动 |
 
 #### 禁用账号与保号任务（`schedule.include_disabled_in_tasks`）
@@ -816,11 +816,16 @@ http://127.0.0.1:7863/panel/
 
 | 分组 | 端点 |
 |---|---|
-| 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`）· `GET packages` · `GET models` · `GET model_probes` · `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
-| 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
-| 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
+| 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`）· `GET usage/official` · `GET packages` · `GET models` · `GET model_probes` · `GET model_queue` · `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
+| 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `pause` · `resume` · `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
+| 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue`；`GET tasks/diag`（单号任务诊断） |
 | 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` |
-| IDE 号池 | `GET ide/qoder/accounts` · `POST ide/qoder/add` · `switch` · `remove` · `checkin` · `checkin_switched` · `renew` · `GET ide/qoder/checkin-status` · `usage` · `device`；`GET ide/minimax/accounts` · `POST ide/minimax/add` · `add_manual` · `remove` · `checkin` · `renew` · **`login/start` · `login/poll`**；`GET ide/doubao/accounts` · `status` · `POST ide/doubao/add_extract` · `add_cookie` · `remove` · `checkin` |
+| Trae 云端签到 | `GET trae/accounts` · `GET trae/credits` · `POST trae/checkin` · `trae/refresh` · `trae/client_sync`；`POST trae/login/start` · `GET trae/login/poll`（OAuth 回调路线）；`POST trae/browser/start` · `GET trae/browser/poll` · `POST trae/browser/stop`（浏览器 CDP 路线） |
+| IDE · Qoder | `GET ide/qoder/accounts` · `POST ide/qoder/add` · `switch` · `remove` · `checkin` · `checkin_switched` · `renew` · `relogin`；`GET ide/qoder/checkin-status` · `usage` · `device` · `claim_history`；`GET/POST ide/qoder/egress`（每账号出口/代理）；`POST ide/qoder/login/start` · `GET ide/qoder/login/poll`（浏览器登录）；`POST ide/qoder/web/start` · `GET ide/qoder/web/poll`（网页登录） |
+| IDE · MiniMax | `GET ide/minimax/accounts` · `POST ide/minimax/add` · `add_manual` · `remove` · `checkin` · `renew` · **`login/start` · `login/poll`**（设备码登录） |
+| IDE · 豆包 | `GET ide/doubao/accounts` · `status` · `POST ide/doubao/add_extract` · `add_cookie` · `launch` · `remove` · `checkin`；`POST ide/doubao/browser/start` · `GET ide/doubao/browser/poll` · `POST ide/doubao/browser/stop` |
+| IDE · CodeArts | `GET ide/codearts/accounts` · `slots` · `api_probe` · `api_test` · `sniff`；`POST ide/codearts/remove` · `browser/start` · `browser/stop` · `checkin` · `add_port` · `refresh` · `import_cookie` · `keepalive` · `probe` · `renew` · `slot_forget`；`GET ide/codearts/browser/poll` |
+| IDE · Trae / WorkBuddy 本地号池 | `GET ide/trae/accounts` · `GET ide/trae/limits`；`POST ide/trae/add` · `switch` · `remove`；`GET ide/workbuddy/accounts` · `usage`；`POST ide/workbuddy/start` · `poll` · `add` · `switch` · `remove` · `sync-pool`（同步到网关池） · `checkin` |
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘） |
 
 账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。
@@ -835,7 +840,7 @@ http://127.0.0.1:7863/panel/
 
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
-| `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
+| `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体无网关侧上限（`max_body_mb` 已移除，对齐上游） |
 | `POST /v1/responses` | Bearer（`api_key` 非空时） | **OpenAI Responses API**（Codex CLI / 官方 SDK `responses.create` 走这个端点，不是 chat/completions）。协议适配层：请求体翻译成 chat 形态后交回同一条选号/粘性/熔断/错误分类管线，响应再翻译回 Responses 形态（`output[]` 物品数组 / 具名 SSE 事件）。支持 `input`（字符串或 item 数组）、`instructions`、`tools`、`reasoning.effort`、`max_output_tokens`、`conversation`、`previous_response_id`（进程内短期续接，多轮）。流式产出 `response.created` / `response.output_text.delta` / `response.function_call_arguments.delta` / `response.completed` 等具名事件 |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 10min；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |

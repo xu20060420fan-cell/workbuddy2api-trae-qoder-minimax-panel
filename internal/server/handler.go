@@ -869,7 +869,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				lastErr = err
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
-					h.cfg.Pool.Disable(acct.UID, "refresh session dead")
+					// 12153 会被临时性触发（网络抖动/上游闪断/refresh 竞态）：与
+					// keepalive 同口径连续计数满 sessionDeadThreshold 次才禁用，
+					// 单次只换号重试（pool/state.go NoteSessionDead 的 P0-1 误杀教训：
+					// 历史 disabled 号全部 refresh 成功，一次即禁误杀了健康号）。
+					if h.cfg.Pool.NoteSessionDead(acct.UID) {
+						log.Printf("WRN: [server] acct=%s 连续 %d 次 12153，禁用", logfmt.Label(acct.UID, acct.Nickname), pool.SessionDeadThreshold())
+					}
 				} else {
 					h.cfg.Pool.NoteError(acct.UID)
 				}
@@ -1454,7 +1460,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		}
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
-		h.cfg.Pool.Disable(uid, "12153 session dead")
+		// 与 refresh 分支/keepalive 同口径：12153 单次只计数不杀号（网络抖动/上游
+		// 闪断会临时性触发，一次即禁误杀健康账号），连续 sessionDeadThreshold 次
+		// 才由 NoteSessionDead 内部 Disable 并清零。返回 true（本次达成禁用）记日志。
+		if h.cfg.Pool.NoteSessionDead(uid) {
+			log.Printf("WRN: [server] acct=%s 连续 %d 次 12153，禁用", logfmt.Label(uid, ""), pool.SessionDeadThreshold())
+		}
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。

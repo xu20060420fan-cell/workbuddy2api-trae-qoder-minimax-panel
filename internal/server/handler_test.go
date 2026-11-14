@@ -770,15 +770,28 @@ func TestChatSessionDeadDisables(t *testing.T) {
 	})
 	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
 	h := NewHandler(Config{Pool: p, Upstream: up})
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	// 12153 会被临时性触发（网络抖动/上游闪断/refresh 竞态）：chat 路径与 keepalive
+	// 同口径——单次只计数换号不杀号，连续 sessionDeadThreshold 次才 Disable
+	//（pool/state.go NoteSessionDead 注释的 P0-1 误杀教训：历史 disabled 号全部
+	// refresh 成功，一次即禁全是误判）。
+	for i := 0; i < pool.SessionDeadThreshold()-1; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+		if rec.Code != 503 {
+			t.Fatalf("attempt %d: code=%d body=%s", i+1, rec.Code, rec.Body)
+		}
+		if st, _ := p.Status("u1"); st.Disabled {
+			t.Fatalf("attempt %d: account disabled before threshold: %+v", i+1, st)
+		}
+	}
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
 	if rec.Code != 503 {
 		t.Errorf("code=%d", rec.Code)
 	}
 	st, _ := p.Status("u1")
 	if !st.Disabled {
-		t.Errorf("account should be disabled: %+v", st)
+		t.Errorf("account should be disabled after %d consecutive 12153: %+v", pool.SessionDeadThreshold(), st)
 	}
 }
 

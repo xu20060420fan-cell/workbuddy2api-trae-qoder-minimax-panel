@@ -136,8 +136,11 @@ func (s *Scheduler) travelAdopt(a *auth.Auth) {
 	if s.adoptTriedToday(a.UID) {
 		return
 	}
-	// 前置：解锁 first_buddy 任务（幂等；失败不阻塞，让 buddy/first 按既有错误路径暴露）。
+	// 前置：解锁 first_buddy 任务（幂等；失败不阻塞，让 buddy/first 按既有错误路径
+	// 暴露——global 域等上报路径可能本就不通，阻塞会把领养永久卡死）。
+	reportOK := true
 	if err := s.cfg.Upstream.ReportChatActivity(a, fmt.Sprintf("wb2api-adopt-%d", time.Now().UnixMilli()), ""); err != nil {
+		reportOK = false
 		log.Printf("travel %s: adopt preflight report: %v", logfmt.Label(a.UID, a.Nickname), err)
 	} else {
 		time.Sleep(adoptReportGap) // 给上游事件处理留时间（对齐脚本实测的 1.05s 间隔口径）
@@ -151,6 +154,13 @@ func (s *Scheduler) travelAdopt(a *auth.Auth) {
 	case err == nil:
 		log.Printf("travel %s: adopt ok (+300 credits)", logfmt.Label(a.UID, a.Nickname))
 	case upstream.IsBuddyTaskIncomplete(err):
+		// 前置上报失败时，"task not completed" 可能只是上报没送达（而非真的没达标）：
+		// 此时不当日封印，下一槽位重试——一次瞬时网络抖动不该把领养（+300c）推迟
+		// 一整天。上报成功后的 task-incomplete 才是真实的对话量门槛未达。
+		if !reportOK {
+			log.Printf("travel %s: adopt deferred (preflight report failed, retry next slot)", logfmt.Label(a.UID, a.Nickname))
+			return
+		}
 		s.markAdoptTried(a.UID)
 		log.Printf("travel %s: adopt skipped (conversation threshold not reached, retry tomorrow)", logfmt.Label(a.UID, a.Nickname))
 	default:

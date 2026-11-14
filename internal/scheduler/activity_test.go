@@ -371,6 +371,7 @@ func TestAllFourDisabledNoSpin(t *testing.T) {
 		ActivityDisabled:  true,
 		KeepaliveDisabled: true,
 		BlackcatDisabled:  true,
+		GrowthDisabled:    true, // New 对空 GrowthHours 默认 [1]，须显式禁用
 		CheckinHours:      []int{9, 21},
 		TravelHours:       []int{9},
 		ActivityHours:     []int{10},

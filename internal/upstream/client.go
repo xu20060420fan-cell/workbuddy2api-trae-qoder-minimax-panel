@@ -120,7 +120,13 @@ var softRateMarkers = []string{
 	"请求过于频繁", "限流",
 }
 
-var sessionDeadMarkers = []string{"Offline user session not found", "12153"}
+// sessionDeadMarkerMsg 12153（offline user session）的确定性文案形态。
+// code "12153" 不能用裸数字子串匹配整个 body：错误体里的 requestId、时间戳、
+// trace 等任何携带这 5 位连续数字的字段都会撞车，把一次普通错误误分类成
+// session 死亡（池侧连续计数满即禁号，误判代价是杀掉健康号）。code 判定改走
+// hasBusinessCode 精确字段等值——与 IsModelBlocked 注释批评的「整段文本子串
+// 匹配」同一教训，Classify 的 sessionDead 层与之一致。
+var sessionDeadMarkerMsg = "Offline user session not found"
 
 // accountFaultMarkers 账号级授权/配额故障关键词（大小写不敏感子串匹配）。
 //
@@ -199,7 +205,6 @@ func isPromptTooLongStatus(status int) bool {
 // 实测 code=10001/14001 "今天已签到"/"今日已签到"）。只对 *Error.Msg 做包含匹配，
 // 网络层/解析层错误不在此识别（见 IsAlreadyCheckin）。
 var alreadyCheckinMarkers = []string{"已签到", "already"}
-var badParamsMarkerCode = `"code":11101`
 
 // softRateResetLoc 上游 429 6004 文案中的重置时间固定按 UTC+8 解释（上游文案如此，
 // 与容器时区无关）。
@@ -222,7 +227,9 @@ const softRateResetPatternEN = `(?i)reset at (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2
 // 分类、每个限流 body 上调用，函数体内 MustCompile 是纯浪费；错误风暴（429
 // 轰炸）时尤甚。模式串均为纯常量。regexp 并发安全（匹配只读），无需额外锁。
 var (
-	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?`)
+	// 右边界断言：`"code":6004` 不能被 `"code":60040` 这类更长 code 前缀命中
+	// （Go regexp/RE2 不支持 lookbehind/lookahead，用 `[^0-9]|$` 收尾）。
+	reModelRateLimit  = regexp.MustCompile(`"code"\s*:\s*"?` + modelRateLimitCode + `"?[^0-9]`)
 	reSoftRateResetCN = regexp.MustCompile(softRateResetPatternCN)
 	reSoftRateResetEN = regexp.MustCompile(softRateResetPatternEN)
 )
@@ -459,10 +466,10 @@ func ParseRateReset(body string) (time.Time, bool) {
 //  0. 11102（IsModelBlocked）——「该后端无此模型」确定性答复，语义最具体，最先判
 //     （只认 400/404，429+11102 属限流语义走第 4 层）。
 //  1. 402 —— 真正的计费余额耗尽状态码，最严、最不可自愈，最先判。
-//  2. sessionDeadMarkers —— 需要人工重登的终态。若 401 body 同时含 "12153" 与
-//     "rate limit"（如网关错误页混排），归 session_dead：短冷却救不活失效 session，
-//     误判为限流会让该死号留在池中反复被选中；且此层 marker 是精确词（12153 等），
-//     比限流层的大范围子串更具体，具体优先于宽泛。
+//  2. sessionDead —— 需要人工重登的终态。若 401 body 同时含 "12153"（code 字段
+//     精确等值或文案）与 "rate limit"（如网关错误页混排），归 session_dead：短冷却
+//     救不活失效 session，误判为限流会让该死号留在池中反复被选中；且此层 marker
+//     是精确词，比限流层的大范围子串更具体，具体优先于宽泛。
 //  3. accountFaultMarkers —— 账号级授权/配额故障（11140 request illegal auth 风控、
 //     14017 trial not activated register 未完成）。必须先于 status==429 判定：
 //     14017 常带 429 状态码，若落到 status==429 会误归 soft_rate（"限流"语义不符：
@@ -502,10 +509,15 @@ func Classify(status int, body string) ErrKind {
 	// sessionDead / accountFault 先于 status==429：账号级终态等不来自愈，限流状态码
 	// 不得掩盖它们（429+14017 必须 accountFault，401+12153 混排 "rate limit" 必须
 	// sessionDead——此层 marker 是精确词，比限流层的大范围子串更具体，具体优先于宽泛）。
-	for _, m := range sessionDeadMarkers {
+	for _, m := range []string{sessionDeadMarkerMsg} {
 		if strings.Contains(body, m) {
 			return ErrSessionDead
 		}
+	}
+	// code 12153 按结构化字段精确等值判（见 sessionDeadMarkerMsg 注释：裸数字
+	// 子串会撞 requestId/时间戳）。
+	if hasBusinessCode(body, "12153") {
+		return ErrSessionDead
 	}
 	for _, m := range accountFaultMarkers {
 		if strings.Contains(lower, strings.ToLower(m)) || strings.Contains(body, m) {
@@ -540,11 +552,10 @@ func Classify(status int, body string) ErrKind {
 	// 11115「prompt is too long」：判在 404/5xx/WAF/内容策略/参数错误/通用 4xx
 	// 之前——请求级语义最具体（上下文超限），须先于宽泛的状态码兜底（404 兜底会
 	// 误归 ErrNotFound 只冷却不透传；ErrClient 只换号，浪费健康号配额）。
+	// code 走 codeMarker（六形态 + 右边界，11135 同款防撞车），文案大小写不敏感。
 	if isPromptTooLongStatus(status) {
-		for _, m := range promptTooLongMarkers {
-			if strings.Contains(body, m) || (m != strings.ToLower(m) && strings.Contains(lower, strings.ToLower(m))) {
-				return ErrPromptTooLong
-			}
+		if strings.Contains(lower, "prompt is too long") || codeMarker(lower, "11115") {
+			return ErrPromptTooLong
 		}
 	}
 	if status == http.StatusNotFound {
@@ -587,7 +598,7 @@ func Classify(status int, body string) ErrKind {
 		// 归 ErrBadParams：不冷却/不熔断/不计错，且**不轮转**——11101 发生在上游解析
 		// 请求体阶段，还没走到模型路由，所以"不同账号可能有不同模型权限"其实是
 		// 11102（ErrModelBlocked）的理由，那里已有 (账号,模型) 负缓存避让。
-		if strings.Contains(body, badParamsMarkerMsg) || strings.Contains(body, badParamsMarkerCode) {
+		if strings.Contains(body, badParamsMarkerMsg) || codeMarker(lower, "11101") {
 			return ErrBadParams
 		}
 		return ErrClient

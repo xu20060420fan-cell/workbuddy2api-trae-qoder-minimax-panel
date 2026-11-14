@@ -24,6 +24,7 @@ func (p *Panel) registerRepairRoutes(mux *http.ServeMux) {
 	// C-QD-API@1 D/E：每账号设备/出口配置的读与写。
 	mux.HandleFunc("GET /panel/api/ide/qoder/egress", p.withAuth(p.qoderEgressGet))
 	mux.HandleFunc("POST /panel/api/ide/qoder/egress", p.withAuth(p.qoderEgressSet))
+	mux.HandleFunc("POST /panel/api/ide/qoder/egress/reset-auto", p.withAuth(p.qoderEgressResetAuto))
 	// C-QD-API@1 C：逐日领取历史账本。
 	mux.HandleFunc("GET /panel/api/ide/qoder/claim_history", p.withAuth(p.qoderClaimHistory))
 

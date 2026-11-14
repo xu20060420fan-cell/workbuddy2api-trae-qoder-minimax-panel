@@ -1525,7 +1525,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   <div class="dlg" style="width:660px">
     <header>
       <h3>Qoder 设备 / 出口</h3>
-      <div class="hint">为单个账号配置独立设备指纹、出口代理与浏览器 profile；未配置时与现网一致（真实设备 + 进程默认网络）。</div>
+      <div class="hint">默认自动：号池里第一个号用真实设备，其余号按邮箱派生 —— 同一台机器上的多个号不会共用同一套设备指纹。手动指定会覆盖自动分配。</div>
     </header>
     <div class="body">
       <div id="qdEgressBody"></div>
@@ -1537,21 +1537,24 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </label>
       <label class="fld"><span class="lb">设备模式（device_mode）</span>
         <select id="qdEgressMode">
-          <option value="real">real（真实设备，默认）</option>
+          <option value="auto">auto（自动分配，默认）</option>
+          <option value="real">real（真实设备）</option>
           <option value="derived">derived（按邮箱确定性派生）</option>
         </select>
-        <span class="hint">derived 是隔离实验能力，不代表上游一定认可该设备</span>
+        <span class="hint">auto = 号池第一个号用真实设备、其余号用邮箱派生；选 real/derived 可手动覆盖</span>
       </label>
       <label class="fld"><span class="lb">出口代理（proxy_url，可空）</span>
         <input type="text" id="qdEgressProxy" placeholder="http://127.0.0.1:1080">
         <span class="hint">留空 = 进程默认网络；仅支持 http/https</span>
       </label>
-      <label class="fld"><span class="lb">浏览器 profile 目录（可空）</span>
-        <input type="text" id="qdEgressProfile" placeholder="留空 = 按邮箱隔离的默认目录">
+      <label class="fld"><span class="lb">浏览器 profile 目录（自动生成）</span>
+        <input type="text" id="qdEgressProfile" readonly>
+        <span class="hint">按邮箱隔离，登录一次即可复用，不需要手填</span>
       </label>
     </div>
     <footer>
       <span class="grow"></span>
+      <button class="xs" id="btnQdEgressResetAuto" title="把号池里所有账号的设备模式恢复为 auto（代理设置保留）">全部恢复自动</button>
       <button class="xs" id="btnQdEgressClose">关闭</button>
       <button class="xs primary" id="btnQdEgressSave">保存</button>
     </footer>

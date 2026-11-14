@@ -101,6 +101,12 @@ func New(cfg Config) *Scheduler {
 	if len(cfg.BlackcatHours) == 0 {
 		cfg.BlackcatHours = []int{23}
 	}
+	// GrowthHours 必须与其余五类同款兜底：nextFire 对空 hours 返回零值会把成长
+	// 队列槽位静默丢弃，且 Reconfigure 对空 hours「保留原值」永不自愈——任何
+	// 绕过 config 层直接 scheduler.New 的构造（嵌入/测试）都会让成长任务无声消失。
+	if len(cfg.GrowthHours) == 0 {
+		cfg.GrowthHours = []int{1}
+	}
 	return &Scheduler{
 		cfg:           cfg,
 		adoptTried:    make(map[string]string),

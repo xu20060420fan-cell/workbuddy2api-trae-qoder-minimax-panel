@@ -138,14 +138,32 @@ func (p *Panel) cachedRead(ttl time.Duration, h http.HandlerFunc) http.HandlerFu
 		panelCache.mu.Unlock()
 
 		cw := &capWriter{header: http.Header{}}
-		h(cw, r)
+		// panic 保护：条目已进 map，若 handler 崩溃导致 close(ready) 不执行，
+		// 这条「正在算」的条目就永不 ready——后续同 key 请求（含后台预热）会全部
+		// 挂死在等 ready 的分支上，只能重启进程。recover 后落一个 500 结果再 close，
+		// 缓存语义与普通失败一致（TTL 过后自动重算）。
+		panicked := false
+		func() {
+			defer func() {
+				if recover() != nil {
+					panicked = true
+				}
+			}()
+			h(cw, r)
+		}()
 
-		ne.body = cw.body.Bytes()
-		ne.status = cw.status
-		if ne.status == 0 {
-			ne.status = http.StatusOK
+		if panicked {
+			ne.status = http.StatusInternalServerError
+			ne.ctype = "text/plain; charset=utf-8"
+			ne.body = []byte(`{"ok":false,"error":"panel handler panic (cache entry)"}`)
+		} else {
+			ne.body = cw.body.Bytes()
+			ne.status = cw.status
+			if ne.status == 0 {
+				ne.status = http.StatusOK
+			}
+			ne.ctype = cw.Header().Get("Content-Type")
 		}
-		ne.ctype = cw.Header().Get("Content-Type")
 		ne.at = time.Now()
 		ne.done = true
 		close(ne.ready)

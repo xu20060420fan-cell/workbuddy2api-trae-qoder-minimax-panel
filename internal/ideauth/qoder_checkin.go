@@ -671,6 +671,10 @@ func qoderCheckinAuth(auth *QoderAuth, dev *QoderDevice, scope string) (res *Qod
 			res.Refreshed = true
 			newAccess, newRefresh = nt, nrt
 			auth.Token = nt
+			// RT 已被服务端轮换消费：必须同步回写到 auth，否则同一调用内后续任一
+			// base 的 401 重试分支会拿已消费的旧 RT 再刷一次（严格轮换下必失败，
+			// 把一个凭证完全有效的号误判成 login_required）。
+			auth.RefreshToken = nrt
 		}
 	}
 
@@ -690,6 +694,8 @@ func qoderCheckinAuth(auth *QoderAuth, dev *QoderDevice, scope string) (res *Qod
 					token, status, raw, base = nt, st2, rw2, b
 					res.Refreshed = true
 					newAccess, newRefresh = nt, nrt
+					// 本次续期已消费旧 RT：同步回写，防止调用内后续分支重复消费。
+					auth.Token, auth.RefreshToken = nt, nrt
 					// 续期后拿到的也可能还是空列表，交给下面的空列表判断
 					if base != "" && len(qoderCampaignsOf(raw)) > 0 {
 						authorized = true
@@ -949,6 +955,9 @@ func qoderScanAuth(auth *QoderAuth, dev *QoderDevice, scope string) qoderScanOut
 			out.result.Refreshed = true
 			out.newAccess, out.newRefresh = nt, nrt
 			auth.Token = nt
+			// RT 已被服务端轮换消费：同步回写（同 qoderCheckinAuth——调用内后续
+			// 401 重试分支会用 auth.RefreshToken 再刷，旧值即已消费）。
+			auth.RefreshToken = nrt
 		}
 	}
 
@@ -973,6 +982,8 @@ func qoderScanAuth(auth *QoderAuth, dev *QoderDevice, scope string) qoderScanOut
 					token = nt
 					out.result.Refreshed = true
 					out.newAccess, out.newRefresh = nt, nrt
+					// 本次续期已消费旧 RT：同步回写，防止调用内后续分支重复消费。
+					auth.Token, auth.RefreshToken = nt, nrt
 					campaigns = qoderCampaignsOf(rw2)
 					out.result.Base = b
 					authorized = true
@@ -1353,6 +1364,78 @@ func QoderDeviceForAccount2(email, uid string) (*QoderDevice, error) {
 	return QoderDeviceForAccountEnv(email, uid, "3")
 }
 
+// QoderEffectiveDeviceMode 解析某账号**实际生效**的设备模式。
+//
+// configured = 该号在 qoder_egress.json 里配的原始值（可能为空 / auto）。
+//
+// 规则（2026-11-14 新增 auto 自动分配）：
+//   - 显式配了 real / derived → 尊重手动配置（手动优先）；
+//   - 配了 auto 或没配 → 按**号池顺序**自动分配：
+//     号池里第一个号 = real（与客户端运行时身份一致），
+//     其余号 = derived（按邮箱确定性派生，彼此不同）。
+//
+// 为什么按顺序而不是按「客户端当前登录的是谁」：客户端登录的号会变，
+// 用它当锚点会让设备身份**随切号漂移**（同一号今天 real、明天 derived，
+// 上游按设备过滤时就会表现成「今天领得到、明天领不到」）。
+// 号池顺序稳定（号池文件里的账号顺序），所以同一号永远同一套身份。
+//
+// 自动分配保证「任意两个号必然不同」：real 只有第一个号，
+// 其余全是按邮箱派生的独立身份。
+func QoderEffectiveDeviceMode(email, configured string) string {
+	m := strings.ToLower(strings.TrimSpace(configured))
+	switch m {
+	case QoderDeviceModeReal, QoderDeviceModeDerived:
+		return m
+	}
+	// auto 或未配置 → 自动分配。
+	if qoderIsFirstPoolAccount(email) {
+		return QoderDeviceModeReal
+	}
+	return QoderDeviceModeDerived
+}
+
+// qoderIsFirstPoolAccount 判断该号是否是号池里的第一个账号。
+//
+// 用号池文件里的账号顺序（稳定），而不是 map 遍历顺序（随机）。
+func qoderIsFirstPoolAccount(email string) bool {
+	key := normalizeQoderEmail(email)
+	if key == "" {
+		return false
+	}
+	pool, err := LoadQoderPool()
+	if err != nil || pool == nil {
+		return false
+	}
+	for _, a := range pool.Accounts {
+		if a == nil {
+			continue
+		}
+		if normalizeQoderEmail(qoderSnapshotEmail(a)) == key {
+			// 找到这个号了：它在列表里的位置决定是不是第一个。
+			return qoderPoolAccountIndex(pool, key) == 0
+		}
+	}
+	return false
+}
+
+// qoderPoolAccountIndex 返回该号在号池里的序号（从 0 起）；找不到返回 -1。
+func qoderPoolAccountIndex(pool *QoderPoolFile, key string) int {
+	if pool == nil {
+		return -1
+	}
+	i := 0
+	for _, a := range pool.Accounts {
+		if a == nil {
+			continue
+		}
+		if normalizeQoderEmail(qoderSnapshotEmail(a)) == key {
+			return i
+		}
+		i++
+	}
+	return -1
+}
+
 // QoderDeviceForAccountEnv 同 QoderDeviceForAccount2，但显式指定 runtime-info
 // 环境码（"3" 国际版 / "0" 国内版）。同一台机器上的不同 Qoder 号可能属于
 // 不同环境，必须按账号传入，不能全局写死。
@@ -1367,7 +1450,8 @@ func QoderDeviceForAccountEnv(email, uid, env string) (*QoderDevice, error) {
 	if base == nil {
 		base = &QoderDevice{}
 	}
-	if strings.ToLower(strings.TrimSpace(prof.DeviceMode)) == QoderDeviceModeDerived {
+	mode := QoderEffectiveDeviceMode(email, prof.DeviceMode)
+	if mode == QoderDeviceModeDerived {
 		dev := qoderDeriveDevice(prof.Email, base)
 		dev.ProxyURL = proxy
 		return dev, nil

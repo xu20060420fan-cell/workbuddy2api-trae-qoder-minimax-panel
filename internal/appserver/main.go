@@ -20,6 +20,7 @@ import (
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/ideauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/minimax"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/mmapi"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
@@ -495,6 +496,18 @@ func Run() {
 	// 只能等签到时撞上 401 才现续，那一次签到就废了。
 	// 这里每小时把「剩余有效期不足 24 小时」的号提前续上。
 	pn.StartQoderRenewAuto(ctx)
+
+	// Qoder 设备/出口配置自动补全（2026-11-14）：号池里每有一个账号就自动
+	// 生成一条 egress（device_mode=auto + 按邮箱隔离的浏览器 profile 目录），
+	// 用户不再需要手动去「设备/出口」弹窗里逐个配。
+	// auto 模式下实际生效的设备由号池顺序自动分配：第一个号 real（与客户端
+	// 运行时身份一致），其余 derived（按邮箱派生，彼此不同）——
+	// 保证「同一台机器上多个号」不会共用同一套设备指纹。
+	if n, err := ideauth.EnsureQoderEgress(); err != nil {
+		log.Printf("[qoder] 启动自动补全设备/出口配置失败（不影响签到）：%v", err)
+	} else if n > 0 {
+		log.Printf("[qoder] 启动自动补全设备/出口配置 %d 个账号（device_mode=auto）", n)
+	}
 
 	// 启动即预热模型积分倍率表：倍率只在 FetchModels/FetchGlobalModelInfos 成功时
 	// 填充（两者均懒触发），重启后到首次 /v1/models 或面板模型页被访问之前，

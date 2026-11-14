@@ -4870,7 +4870,9 @@ async function openQoderEgress(email) {
   if ($('qdEgressEmail')) $('qdEgressEmail').value = email || '';
   /* 显示的是脱敏标识，真邮箱留在隐藏字段里（保存时按邮箱定位账号） */
   if ($('qdEgressEmailLabel')) $('qdEgressEmailLabel').value = identLabel(email, '未选择');
-  if ($('qdEgressMode')) $('qdEgressMode').value = 'real';
+  /* 默认 auto：设备身份按号池顺序自动分配（首个号 real、其余 derived），
+     用户不必手动逐个配；选 real/derived 才是手动覆盖。 */
+  if ($('qdEgressMode')) $('qdEgressMode').value = 'auto';
   if ($('qdEgressProxy')) $('qdEgressProxy').value = '';
   if ($('qdEgressProfile')) $('qdEgressProfile').value = '';
   const body = $('qdEgressBody');
@@ -4881,17 +4883,17 @@ async function openQoderEgress(email) {
     const key = String(email || '').toLowerCase();
     const p = profiles.find(x => String((x && x.email) || '').toLowerCase() === key) || null;
     if (p) {
-      if ($('qdEgressMode')) $('qdEgressMode').value = p.device_mode || 'real';
+      if ($('qdEgressMode')) $('qdEgressMode').value = p.device_mode || 'auto';
       if ($('qdEgressProxy')) $('qdEgressProxy').value = p.proxy_url || '';
       if ($('qdEgressProfile')) $('qdEgressProfile').value = p.profile_dir || '';
     }
     if (body) {
       body.innerHTML = p
-        ? '<div class="note">当前：' + esc(identLabel(p.email, '未设置')) + ' · 设备 ' + esc(p.device_mode || 'real') +
+        ? '<div class="note">当前：' + esc(identLabel(p.email, '未设置')) + ' · 设备 ' + esc(qdDeviceModeText(p)) +
           ' · 出口 ' + esc(p.proxy_url || '默认网络') +
           (p.updated_at ? ' · 更新于 ' + esc(caTime(p.updated_at) || p.updated_at) : '') + '</div>' +
           '<div class="note" data-qd-probe="' + esc(p.email || '') + '">' + esc(qdProbeLine(p)) + '</div>'
-        : '<div class="note">该账号尚无独立设备/出口配置（默认与现网一致：真实设备 + 进程默认网络）。</div>';
+        : '<div class="note">该账号尚无独立设备/出口配置（默认自动分配设备身份 + 进程默认网络）。</div>';
     }
   } catch (e) {
     // 老后端未注册路由（404）：按“无配置”降级，不抛异常、不编造结论。
@@ -4899,9 +4901,19 @@ async function openQoderEgress(email) {
   }
 }
 
+/* qdDeviceModeText 设备模式的人话描述：auto 时把「自动分配」和「实际生效」
+   都说清楚，避免用户以为自动分配等于所有号都用真实设备。 */
+function qdDeviceModeText(p) {
+  const mode = (p && p.device_mode) || 'auto';
+  const eff = (p && p.effective_device_mode) || '';
+  if (mode !== 'auto') return mode;
+  if (eff) return 'auto（自动分配 → ' + eff + '）';
+  return 'auto（自动分配）';
+}
+
 async function saveQoderEgress() {
   const email = ($('qdEgressEmail') && $('qdEgressEmail').value || '').trim();
-  const mode = ($('qdEgressMode') && $('qdEgressMode').value) || 'real';
+  const mode = ($('qdEgressMode') && $('qdEgressMode').value) || 'auto';
   const proxy = ($('qdEgressProxy') && $('qdEgressProxy').value || '').trim();
   const profile = ($('qdEgressProfile') && $('qdEgressProfile').value || '').trim();
   const errEl = $('qdEgressErr');
@@ -4962,7 +4974,26 @@ async function openQoderHistory(email) {
   }
 }
 
+// resetQoderEgressAuto 一键把号池所有账号的设备模式恢复为「自动分配」。
+// 代理设置保留（代理是手动配的资源，不该被这个操作清掉）。
+async function resetQoderEgressAuto() {
+  if (!confirm('把号池里所有账号的设备模式恢复为「自动分配」？\n\n自动分配规则：号池第一个号用真实设备，其余号按邮箱派生（任意两个号必然不同）。\n代理设置保持不变。')) return;
+  const btn = $('btnQdEgressResetAuto');
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '恢复中…'; }
+  try {
+    const d = await api('ide/qoder/egress/reset-auto', { method: 'POST', body: '{}' });
+    if (!d || d.ok !== true) throw new Error((d && (d.error || d.message)) || '恢复失败');
+    toast('已恢复自动分配（改动 ' + Number(d.changed || 0) + ' 个账号）', 'ok');
+    if ($('qdEgressVeil')) $('qdEgressVeil').classList.remove('on');
+    if (!viewFrozen()) loadCkQoder(true);
+  } catch (e) {
+    toast('恢复失败：' + e.message, 'err');
+  } finally { if (btn) { btn.disabled = false; btn.textContent = old || '全部恢复自动'; } }
+}
+
 if ($('btnQdEgressSave')) $('btnQdEgressSave').onclick = saveQoderEgress;
+if ($('btnQdEgressResetAuto')) $('btnQdEgressResetAuto').onclick = resetQoderEgressAuto;
 if ($('btnQdEgressClose')) $('btnQdEgressClose').onclick = () => {
   if ($('qdEgressVeil')) $('qdEgressVeil').classList.remove('on');
 };
@@ -5495,14 +5526,32 @@ async function loadCkQoder(quiet) {
     }
     // 骨架：先出账号行，状态列占位「查询中…」。
     renderQoderRows(rows, arr, cur, null);
+    // 设备身份（自动分配结果）：本地读，很快 —— 并行取，不拖慢状态列。
+    const eg = await api('ide/qoder/egress').catch(() => null);
     // 状态查询在后台补：拿到真值后整表重绘一次。
     const st2 = await api('ide/qoder/checkin-status').catch(() => null);
-    renderQoderRows(rows, arr, cur, st2);
+    renderQoderRows(rows, arr, cur, st2, eg);
   } catch (e) { st.hidden = false; st.className = 'state err'; st.textContent = e.message; }
 }
 
+// qdDeviceTags 返回「账号 → 设备身份标签」的映射（用于卡片上显示）。
+//
+// 2026-11-14：设备身份自动分配后，用户需要一眼看出「两个号用的是不同设备」。
+// 这里显示**实际生效**的设备模式（auto 已展开），并把派生设备的短指纹带上，
+// 让「同号恒定、异号不同」可见。
+function qdDeviceTags(eg) {
+  const map = {};
+  ((eg && eg.profiles) || []).forEach(p => {
+    if (!p || !p.email) return;
+    const k = String(p.email).toLowerCase();
+    const eff = p.effective_device_mode || p.device_mode || 'auto';
+    map[k] = eff === 'derived' ? '派生设备' : (eff === 'real' ? '真实设备' : '自动');
+  });
+  return map;
+}
+
 // renderQoderRows 渲染 Qoder 卡片列表。st2 为 null = 状态还没到（先画骨架）。
-function renderQoderRows(rows, arr, cur, st2) {
+function renderQoderRows(rows, arr, cur, st2, eg) {
   const st = $('ckQoderState'), list = $('ckQoderList');
   if (!st || !list) return;
   const doneMap = {}, quotaMap = {}, msgMap = {}, holderMap = {};
@@ -5529,6 +5578,7 @@ function renderQoderRows(rows, arr, cur, st2) {
     doneMap[cur.toLowerCase()] = !!st2.current.checked_in_today;
   }
   const doneCount = rows.filter(a => doneMap[String(a.email || '').toLowerCase()]).length;
+  const devTagMap = qdDeviceTags(eg);
   // 「人」组数：服务端判定为同一个人的账号共享同一份每日额度，组数才是"能领几份"。
   const groups = new Set();
   rows.forEach(a => {
@@ -5601,6 +5651,8 @@ function renderQoderRows(rows, arr, cur, st2) {
     if (rank > 0) meta.push('本轮顺序 #' + rank);
     if (lastClaim) meta.push('上次领到 ' + (caTime(lastClaim) || lastClaim));
     if (histDays > 0) meta.push('历史已领 ' + histDays + ' 天');
+    const devTag = devTagMap[String(email || '').toLowerCase()];
+    if (devTag) meta.push('设备 ' + devTag);
     const metaHTML = meta.length
       ? '<div class="note" style="margin-top:3px" data-qd-meta="' + esc(email) + '">' + esc(meta.join(' · ')) + '</div>'
       : '';
@@ -5615,7 +5667,7 @@ function renderQoderRows(rows, arr, cur, st2) {
         ? '<span class="note">—</span>'
         : (isDone ? UI.off('已签到', '今日已签到') : UI.act('data-ck-qoder', email, '签到', '今天让这个号先领（池里其余号也会一起打一遍）'))) +
       UI.sub('data-qd-relogin', email, '重新登录该号', '在 Qoder 客户端里用这个号扫码登录一次（上游没给这个号下发当日活动时的正解）') +
-      UI.sub('data-qd-egress', email, '设备/出口', '为该账号配置独立设备指纹 / 出口代理 / 浏览器 profile') +
+      UI.sub('data-qd-egress', email, '设备/出口', '设备身份默认自动分配（首个号真实设备、其余按邮箱派生），这里可手动覆盖 / 配出口代理') +
       UI.sub('data-qd-history', email, '历史', '查看最近 7 天领取历史') +
       '</div>' +
       '</div>';

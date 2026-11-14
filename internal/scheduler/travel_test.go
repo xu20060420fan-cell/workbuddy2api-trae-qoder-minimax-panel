@@ -18,18 +18,27 @@ import (
 
 // travelStub 模拟 growth 域全部端点，记录调用次数与请求参数。
 type travelStub struct {
-	buddy       string // /buddy/info 的 data.buddy 原文（"null" 或对象）
-	state       string // /travel/status 的 data 原文
-	firstStatus int    // /buddy/first 的 HTTP 状态码（非 0 时按业务错误返回）
+	buddy        string // /buddy/info 的 data.buddy 原文（"null" 或对象）
+	state        string // /travel/status 的 data 原文
+	firstStatus  int    // /buddy/first 的 HTTP 状态码（非 0 时按业务错误返回）
+	reportStatus int    // /v2/report 的 HTTP 状态码（0 = 成功；模拟上报路径故障时设 4xx/5xx）
 
 	infoCalls, statusCalls, departCalls atomic.Int32
 	claimCalls, firstCalls, agreeCalls  atomic.Int32
+	reportCalls                         atomic.Int32
 	location, record                    atomic.Int64
 }
 
 func (s *travelStub) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/v2/report":
+			s.reportCalls.Add(1)
+			if s.reportStatus >= 400 {
+				http.Error(w, "not found", s.reportStatus)
+				return
+			}
+			w.Write([]byte(`{"code":0,"msg":"ok","data":{}}`))
 		case "/activity/growth/buddy/info":
 			s.infoCalls.Add(1)
 			fmt.Fprintf(w, `{"code":0,"msg":"ok","data":{"buddy":%s}}`, s.buddy)
@@ -96,7 +105,9 @@ func fastTravel(t *testing.T) {
 	t.Helper()
 	old := travelAccountDelay
 	travelAccountDelay = 0
-	t.Cleanup(func() { travelAccountDelay = old })
+	oldGap := adoptReportGap
+	adoptReportGap = 0 // 领养前置上报后的等待一并缩短，保持测试快
+	t.Cleanup(func() { travelAccountDelay = old; adoptReportGap = oldGap })
 }
 
 // newTravelScheduler 构造 travel 相关依赖齐全的调度器。
@@ -278,6 +289,8 @@ func TestRunTravelStateMachine(t *testing.T) {
 }
 
 // TestRunTravelAdoptThresholdTriedOncePerDay 门槛未达（400）当日只试一次，后续巡检静默跳过。
+// 前置上报默认成功（reportStatus=0）：此条件下 "task not completed" 是真实的对话量
+// 门槛未达，封印当日成立。
 func TestRunTravelAdoptThresholdTriedOncePerDay(t *testing.T) {
 	fastTravel(t)
 	stub := &travelStub{buddy: "null", firstStatus: 400}
@@ -297,6 +310,27 @@ func TestRunTravelAdoptThresholdTriedOncePerDay(t *testing.T) {
 	}
 	if n := stub.infoCalls.Load(); n != 3 {
 		t.Errorf("info calls=%d want 3（仍每趟查有无猫）", n)
+	}
+}
+
+// TestRunTravelAdoptNotSealedWhenReportFailed 前置上报失败（网络抖动/路径不可达）时，
+// buddy/first 的 "task not completed" 不可信（可能只是上报没送达、任务没解锁）——
+// 不当日封印，下一槽位重试；一次瞬时失败不该把领养（+300c）推迟一整天。
+func TestRunTravelAdoptNotSealedWhenReportFailed(t *testing.T) {
+	fastTravel(t)
+	stub := &travelStub{buddy: "null", firstStatus: 400, reportStatus: 404}
+	srv := stub.server()
+	defer srv.Close()
+
+	s, _ := newTravelScheduler(t, srv, "u1")
+	s.RunTravelNow()
+	s.RunTravelNow()
+
+	if n := stub.reportCalls.Load(); n != 2 {
+		t.Errorf("report calls=%d want 2", n)
+	}
+	if n := stub.firstCalls.Load(); n != 2 {
+		t.Errorf("first calls=%d want 2（上报失败不封印，应重试）", n)
 	}
 }
 
