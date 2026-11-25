@@ -198,11 +198,28 @@ func (c *Client) ClaimSignin(ctx context.Context, cred Credentials) (*SigninClai
 	return out, nil
 }
 
+// CreditDetail 单个积分包（/credit/details 的一条明细）。
+//
+// 这是 MiniMax 官方唯一能拿到的「积分构成」粒度：每笔发放的授予量、剩余量、
+// 已消耗量、发放时间与到期时间都在这里。签到积分（credit_type=2）与付费包
+// 会混在同一个列表里，前端按到期时间聚合展示，不臆造来源名。
+type CreditDetail struct {
+	Granted    float64 `json:"granted"`
+	Remaining  float64 `json:"remaining"`
+	Consumed   float64 `json:"consumed"`
+	GrantedAt  int64   `json:"granted_at_ms"`
+	ExpireAt   int64   `json:"expire_at_ms"`
+	CreditType int     `json:"credit_type"`
+}
+
 // CreditSummary 积分概览。
 type CreditSummary struct {
 	Remaining float64 `json:"remaining"`
 	Granted   float64 `json:"granted"`
 	ExpireAt  int64   `json:"expire_at_ms"`
+	// Details 逐包明细（按上游返回顺序；source=granted_at_ms）。
+	// 老调用方只读前三个字段时行为不变。
+	Details []CreditDetail `json:"details,omitempty"`
 }
 
 // QueryCredits 查询某账号的积分明细（汇总剩余/累计/最近到期）。
@@ -219,9 +236,12 @@ func (c *Client) QueryCredits(ctx context.Context, cred Credentials) (*CreditSum
 	}
 	var r struct {
 		Details []struct {
-			Granted   string `json:"granted_amount"`
-			Remaining string `json:"remaining_amount"`
-			ExpireAt  int64  `json:"expire_at_ms"`
+			Granted    string `json:"granted_amount"`
+			Remaining  string `json:"remaining_amount"`
+			Consumed   string `json:"consumed_amount"`
+			GrantedAt  int64  `json:"granted_at_ms"`
+			ExpireAt   int64  `json:"expire_at_ms"`
+			CreditType int    `json:"credit_type"`
 		} `json:"details"`
 	}
 	if err := json.Unmarshal(raw, &r); err != nil {
@@ -229,8 +249,17 @@ func (c *Client) QueryCredits(ctx context.Context, cred Credentials) (*CreditSum
 	}
 	out := &CreditSummary{}
 	for _, d := range r.Details {
-		out.Remaining += parseFloatOr0(d.Remaining)
-		out.Granted += parseFloatOr0(d.Granted)
+		detail := CreditDetail{
+			Granted:    parseFloatOr0(d.Granted),
+			Remaining:  parseFloatOr0(d.Remaining),
+			Consumed:   parseFloatOr0(d.Consumed),
+			GrantedAt:  d.GrantedAt,
+			ExpireAt:   d.ExpireAt,
+			CreditType: d.CreditType,
+		}
+		out.Details = append(out.Details, detail)
+		out.Remaining += detail.Remaining
+		out.Granted += detail.Granted
 		if out.ExpireAt == 0 || (d.ExpireAt > 0 && d.ExpireAt < out.ExpireAt) {
 			out.ExpireAt = d.ExpireAt
 		}
@@ -516,11 +545,11 @@ func saveAccount(acc Account) {
 
 // RenewResult 单账号续期结果。
 type RenewResult struct {
-	ID       string `json:"id"`
-	Label    string `json:"label"`
-	Phase    string `json:"phase"` // renewed / adopted / skipped / error
-	Msg      string `json:"msg"`
-	SyncedClient bool `json:"synced_client,omitempty"` // 新 token 已同步回客户端 auth.json
+	ID           string `json:"id"`
+	Label        string `json:"label"`
+	Phase        string `json:"phase"` // renewed / adopted / skipped / error
+	Msg          string `json:"msg"`
+	SyncedClient bool   `json:"synced_client,omitempty"` // 新 token 已同步回客户端 auth.json
 }
 
 // expiringSoon 判断账号是否将在 d 内过期（已过期也算）。
@@ -701,7 +730,7 @@ func (c *Client) AddManualRegion(ctx context.Context, access, refresh string, ex
 	}
 	acc := &Account{
 		ID: id, Label: fmt.Sprintf("MiniMax 账号 %d", len(pool.Accounts)+1),
-		Region: region,
+		Region:      region,
 		AccessToken: cred.AccessToken, RefreshToken: cred.RefreshToken,
 		ExpiresAtMs: expiresAtMs, SavedAt: time.Now().Format(time.RFC3339),
 	}
@@ -740,8 +769,8 @@ func is401(err error) bool {
 
 // Account 号池中的一个 MiniMax 账号。
 type Account struct {
-	ID           string `json:"id"`
-	Label        string `json:"label"`
+	ID    string `json:"id"`
+	Label string `json:"label"`
 	// Region 区域（cn / global）。决定续期与签到打哪套域 —— 国际号必须走
 	// account.minimax.io / agent.minimax.io，用 CN 端点刷必然 invalid_grant。
 	Region       string `json:"region,omitempty"`
@@ -867,7 +896,7 @@ func CaptureCurrent(ctx context.Context, c *Client) (*Account, bool, error) {
 	}
 	acc := &Account{
 		ID: id, Label: fmt.Sprintf("MiniMax 账号 %d", len(pool.Accounts)+1),
-		Region: region,
+		Region:      region,
 		AccessToken: cred.AccessToken, RefreshToken: cred.RefreshToken,
 		ExpiresAtMs: exp, SavedAt: time.Now().Format(time.RFC3339),
 	}
@@ -902,13 +931,13 @@ func RemoveAccount(id string) error {
 
 // AccountSignin 单账号签到结果。
 type AccountSignin struct {
-	ID       string  `json:"id"`
-	Label    string  `json:"label"`
-	Phase    string  `json:"phase"` // claimed / already / error
-	Points   float64 `json:"points"`
-	Msg      string  `json:"msg"`
-	Expired  bool    `json:"expired"`
-	DayNo    int     `json:"day_no"`
+	ID      string  `json:"id"`
+	Label   string  `json:"label"`
+	Phase   string  `json:"phase"` // claimed / already / error
+	Points  float64 `json:"points"`
+	Msg     string  `json:"msg"`
+	Expired bool    `json:"expired"`
+	DayNo   int     `json:"day_no"`
 }
 
 // SigninAccounts 对号池账号逐个签到（ids 为空 = 全部）。
@@ -973,9 +1002,11 @@ type AccountStatus struct {
 	// CreditsTotal 累计授予的积分总量（各明细包 granted 之和）。
 	// 有了它才能回答「总量还剩多少」：remaining / total。
 	CreditsTotal float64 `json:"credits_total"`
-	Expired      bool    `json:"expired"`
-	ExpiresAtMs  int64   `json:"expires_at_ms"`
-	Error        string  `json:"error,omitempty"`
+	// CreditsDetails 逐包明细（官方 /credit/details 口径）：授予/剩余/已消耗/到期。
+	CreditsDetails []CreditDetail `json:"credits_details,omitempty"`
+	Expired        bool           `json:"expired"`
+	ExpiresAtMs    int64          `json:"expires_at_ms"`
+	Error          string         `json:"error,omitempty"`
 }
 
 // StatusOfAccounts 查询号池各账号的签到状态与积分（只读，不打领取接口）。
@@ -1014,7 +1045,7 @@ func StatusOfAccounts(ctx context.Context, client *Client) ([]AccountStatus, err
 		rc.fillProfile(ctx, a, cred)
 		st := AccountStatus{
 			ID: a.ID, Label: a.Label, UserID: a.UserID, UserName: a.UserName, Email: a.Email,
-			Region: NormalizeRegion(a.Region),
+			Region:    NormalizeRegion(a.Region),
 			AvatarURL: a.AvatarURL, Expired: cred.Expired(), ExpiresAtMs: a.ExpiresAtMs,
 		}
 		if err == nil && signin.Today != nil {
@@ -1031,6 +1062,7 @@ func StatusOfAccounts(ctx context.Context, client *Client) ([]AccountStatus, err
 		if cerr == nil && credits != nil {
 			st.Credits = credits.Remaining
 			st.CreditsTotal = credits.Granted
+			st.CreditsDetails = credits.Details
 		}
 		out = append(out, st)
 	}

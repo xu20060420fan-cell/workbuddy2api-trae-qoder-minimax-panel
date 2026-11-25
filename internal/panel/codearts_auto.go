@@ -160,7 +160,15 @@ func (p *Panel) codeartsAutoCheckinOnce() {
 		group := codeartsSamePersonDayKey(a)
 		if codeartsSamePersonPlanSkipped(plan, a) || codeartsSamePersonDailyFailed(group, now, a) {
 			if codeartsNoteOnce("codearts:same-person:checkin:" + group) {
-				log.Printf("[codearts] 同人组 %s 今天已有一个号执行过签到，账号 %s 跳过（skipped_same_person）", group, a.ID)
+				// 原因必须分清：组内今天真领到了（跳过是对的） vs 组内今天
+				// 已经打过一次但会话失效（需要用户重新登录，不能再等自动重试）。
+				// 此前两种情况都写「今天已有一个号执行过签到」，后者会让用户
+				// 一直等一个永远不会发生的自动签到。
+				if codeartsPersonGroupSucceeded(pool.Accounts, a, codeartsAutoDayOf(now)) {
+					log.Printf("[codearts] 同人组 %s 今天已领到积分，账号 %s 跳过（skipped_same_person）", group, a.ID)
+				} else {
+					log.Printf("[codearts] 同人组 %s 今天已尝试但未成功（会话失效/需重新登录），账号 %s 本轮跳过自动重试", group, a.ID)
+				}
 			}
 			continue
 		}
@@ -281,6 +289,22 @@ func codeartsPersonDaySucceeded(members []*codearts.Account, day string) bool {
 		}
 	}
 	return false
+}
+
+// codeartsPersonGroupSucceeded 该账号所在同人组今天是否已经有号成功过。
+// 只用于日志/提示区分「已领到」与「打过但失败」，不参与执行决策。
+func codeartsPersonGroupSucceeded(accs []*codearts.Account, a *codearts.Account, day string) bool {
+	if a == nil {
+		return false
+	}
+	key := codeartsSamePersonDayKey(a)
+	var members []*codearts.Account
+	for _, x := range accs {
+		if x != nil && codeartsSamePersonDayKey(x) == key {
+			members = append(members, x)
+		}
+	}
+	return codeartsPersonDaySucceeded(members, day)
 }
 
 // codeartsPersonDayAttempted 组内是否今天已经打过一次（成功与否不论）。

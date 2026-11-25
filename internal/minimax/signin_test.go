@@ -176,3 +176,42 @@ func TestCaptureCurrentDeduplicates(t *testing.T) {
 		t.Fatal("号池文件不是合法 JSON")
 	}
 }
+
+// TestQueryCreditsDetails 积分明细必须解析出逐包的授予/剩余/已用/到期/类型。
+// 积分构成页依赖这五个字段；只解析 remaining 会让「已用」永远显示 0。
+func TestQueryCreditsDetails(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/credit/details") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"details":[
+			{"granted_amount":"400.00","remaining_amount":"399.93","consumed_amount":"0.07","granted_at_ms":1795104000000,"expire_at_ms":1797696000000,"credit_type":2},
+			{"granted_amount":"1000.00","remaining_amount":"861.10","consumed_amount":"138.90","granted_at_ms":1795017600000,"expire_at_ms":1797609600000,"credit_type":2}
+		],"base_resp":{"status_code":0,"status_msg":"ok"}}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{BaseURL: srv.URL + "/mavis/api/v1", HTTP: srv.Client()}
+	sum, err := c.QueryCredits(context.Background(), Credentials{AccessToken: "tok"})
+	if err != nil {
+		t.Fatalf("QueryCredits: %v", err)
+	}
+	if len(sum.Details) != 2 {
+		t.Fatalf("应解析出 2 个积分包，得到 %d", len(sum.Details))
+	}
+	first := sum.Details[0]
+	if first.Granted != 400 || first.Remaining != 399.93 || first.Consumed != 0.07 {
+		t.Errorf("第一个包解析错误：%+v", first)
+	}
+	if first.ExpireAt != 1797696000000 || first.CreditType != 2 {
+		t.Errorf("到期/类型解析错误：%+v", first)
+	}
+	if sum.Granted != 1400 || sum.Remaining != 1261.03 {
+		t.Errorf("汇总错误：granted=%v remaining=%v", sum.Granted, sum.Remaining)
+	}
+	if sum.ExpireAt != 1797609600000 {
+		t.Errorf("最早到期应为 1797609600000，得到 %d", sum.ExpireAt)
+	}
+}

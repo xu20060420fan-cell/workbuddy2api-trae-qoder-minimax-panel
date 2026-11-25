@@ -440,8 +440,8 @@ function go(v) {
   if (v === 'models') { if (!$('mdBody').children.length) loadModels(); loadModelQueue(); }
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
-  if (v === 'usage') { loadUsage(); loadUsageOfficial(); }
-  if (v === 'packages') { loadPackages(); loadPkIdea(true); }
+  if (v === 'usage') { loadUsage(); loadUsageOfficial(); loadUsagePlatforms(); }
+  if (v === 'packages') { loadCreditsAll(false); }
   if (v === 'taskscenter') { reattachQueueView(); loadIdeaTasks(true); }
   if (v === 'checkin') { loadTraeStatus(true); loadTraeCredits(true); loadCheckinPool(true); loadQkCredits(true); loadWkCredits(true); loadMmCredits(true); loadCaCredits(true); }
   // 冻结期内进 IDE 账号页不自动重取：保留切换前那份列表与滚动位置。
@@ -558,6 +558,25 @@ function renderAccounts(list) {
    - Trae：v1 额度接口的模型请求限额（快速/慢速请求 = 优先/排队）；
    - Qoder：无模型级接口，仅提示。 */
 function fmtNum(n) { n = Number(n); return Number.isFinite(n) ? String(Math.round(n * 100) / 100) : '—'; }
+
+/* ckBalHtml 积分总览/签到池统一的余额单元格：
+   大字剩余 + 「/ 总量」 + 第二行「已用 X · 计划/来源」。
+   以前每个平台各写一套（WorkBuddy 只有 864/910，Qoder 多一个 Free 标签，
+   MiniMax 又是另一种），用户看着像五个不同的页面。现在同一口径。 */
+function ckBalHtml(remain, total, used, note) {
+  const r = Number(remain), t = Number(total);
+  const u = (used == null || !Number.isFinite(Number(used)))
+    ? (Number.isFinite(r) && Number.isFinite(t) && t >= r ? t - r : null)
+    : Number(used);
+  const fmt = n => n.toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+  let html = '<b>' + (Number.isFinite(r) ? fmt(r) : '—') + '</b>';
+  if (Number.isFinite(t) && t > 0) html += ' <span class="note">/ ' + fmt(t) + '</span>';
+  const bits = [];
+  if (u != null && Number.isFinite(u)) bits.push('已用 ' + fmt(u));
+  if (note) bits.push(note);
+  if (bits.length) html += '<div class="note">' + esc(bits.join(' · ')) + '</div>';
+  return html;
+}
 
 function renderMqLocks(rows) {
   const tb = $('mqLockBody');
@@ -2012,7 +2031,7 @@ function reloadCurrentView(skipOverview) {
   else if (view === 'taskscenter') { reattachQueueView(); loadIdeaTasks(true); }
   else if (view === 'checkin') { loadTraeStatus(true); loadTraeCredits(true); loadCheckinPool(true); loadQkCredits(true); loadWkCredits(true); loadMmCredits(true); loadCaCredits(true); }
   else if (view === 'usage') { loadUsage(); loadUsageOfficial(); }
-  else if (view === 'packages') { loadPackages(); loadPkIdea(true); }
+  else if (view === 'packages') { loadCreditsAll(true); }
   else if (view === 'models') { loadModels(); loadModelQueue(); }
   restoreScrollTo(y);
   // 列表是异步渲染的：分两拍补内部滚动（首拍覆盖首屏，次拍覆盖慢请求）。
@@ -2658,18 +2677,13 @@ async function loadTraeCredits(quiet) {
       return;
     }
     tb.innerHTML = arr.map(a => {
-      let bal;
-      if (a.has_balance) {
-        const n = Number(a.balance).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
-        const src = a.balance_source === 'local'
-          ? ' <span class="tag mute">快照</span>' : '';
-        bal = '<b>' + n + '</b>' + src;
-      } else {
-        bal = '<span style="color:var(--ink-3)">—</span>';
-      }
+      const bal = a.has_balance
+        ? ckBalHtml(a.balance, a.limit, a.used,
+          a.balance_source === 'local' ? '本地快照（可能滞后）' : '上游实时')
+        : '<span class="note">—</span>';
       const ck = a.has_checkin
         ? '<b>+' + Number(a.checkin_credits).toLocaleString('zh-CN', { maximumFractionDigits: 0 }) + '</b>'
-        : '<span style="color:var(--ink-3)">—</span>';
+        : '<span class="note">—</span>';
       return '<tr>' +
         '<td class="who"><div class="nm">' + esc(a.name || '未命名') + '</div>' +
         '<div class="id">' + esc(a.user_id || '') + '</div></td>' +
@@ -2986,7 +3000,15 @@ function renderScanResult(d) {
   const failed = scanHasError(d);
   const runButton = $('btnRunQueue');
   if (runButton) {
-    runButton.disabled = !groups.some(group => group.rows.some(row => row.status === 'scan'));
+    const autoN = groups.reduce((n, g) => n + g.rows.filter(r => r.status === 'scan' || r.action === 'auto' || r.action === 'claim_only').length, 0);
+    const manualN = groups.reduce((n, g) => n + g.rows.filter(r => r.status === 'manual' || r.status === 'client').length, 0);
+    const lockedN = groups.reduce((n, g) => n + g.rows.filter(r => r.status === 'locked').length, 0);
+    runButton.disabled = autoN === 0;
+    runButton.textContent = autoN > 0 ? '一键完成可自动任务' : '暂无可自动任务';
+    runButton.title = autoN > 0
+      ? '只执行面板有自动动作的任务；每项完成后强制回读验证'
+      : ('当前没有可自动执行的任务：' + manualN + ' 项需客户端/真实操作' +
+        (lockedN ? '，' + lockedN + ' 项未解锁' : '') + '。这些任务不会被伪装成完成。');
   }
   if (!groups.length) {
     const empty = $('tcEmpty'), list = $('qcList');
@@ -3022,7 +3044,9 @@ $('btnScanAll').onclick = async () => {
 };
 $('btnRunQueue').onclick = async () => {
   const conc = Number($('qcConc').value) || 1;
-  if (!confirm('执行可自动完成的任务并领取已达标奖励（账号并发 ' + conc + '）。\n含真实对话的任务可能需要一些时间，确认继续？')) return;
+  if (!confirm('一键完成所有「可自动执行」的任务，并领取已达标奖励（账号并发 ' + conc + '）。\n\n' +
+    '需客户端/真实操作的任务不会被伪装成完成，会在结果里逐项说明原因。\n' +
+    '含真实对话的任务可能需要一些时间，确认继续？')) return;
   const b = $('btnRunQueue');
   b.disabled = true; b.textContent = '启动中…';
   try {
@@ -3042,8 +3066,94 @@ $('btnRunQueue').onclick = async () => {
     toast('队列已启动：' + r.total + ' 项（并发 ' + conc + '）', 'ok');
     startQueuePolling();
   } catch (e) { toast(e.message, 'err'); }
-  finally { b.disabled = false; b.textContent = '执行可自动任务'; }
+  finally { b.disabled = false; b.textContent = '一键完成可自动任务'; }
 };
+
+/* 任务行/账号组的「一键完成」：直接复用单任务与单账号全量接口。
+   - 单任务 auto：accounts/{uid}/tasks/auto，后端动作后强制回读并自动领奖；
+   - 单账号 auto_all：accounts/{uid}/tasks/auto_all，按依赖顺序执行全部可自动项；
+   - claim_only：accounts/{uid}/tasks/claim，直接领已达标奖励。
+   执行完统一重新扫描，让列表状态来自上游而不是前端猜测。 */
+async function doTaskAutoOne(btn, uid, code) {
+  if (!uid || !code) return;
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '执行中…'; }
+  try {
+    const d = await api('accounts/' + encodeURIComponent(uid) + '/tasks/auto', {
+      method: 'POST', body: JSON.stringify({ task_code: code }),
+    });
+    const before = d.progress_before || '—';
+    const after = d.progress_after || '—';
+    toast('已执行：' + (d.message || code) + '（进度 ' + before + ' → ' + after + '）',
+      d.claimed || (after !== '—' && after !== before) ? 'ok' : 'warn');
+  } catch (e) { toast(e.message, 'err'); }
+  finally {
+    if (btn) { btn.disabled = false; btn.textContent = old || '一键完成'; }
+    $('btnScanAll').click();
+  }
+}
+
+async function doTaskClaimOne(btn, uid, code) {
+  if (!uid || !code) return;
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '领取中…'; }
+  try {
+    const d = await api('accounts/' + encodeURIComponent(uid) + '/tasks/claim', {
+      method: 'POST', body: JSON.stringify({ task_code: code }),
+    });
+    toast(d.already_claimed ? '该奖励此前已领取' : ('已领取 +' + (d.credit || 0) + ' 分 +' + (d.energy || 0) + ' 能'), 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  finally {
+    if (btn) { btn.disabled = false; btn.textContent = old || '领取'; }
+    $('btnScanAll').click();
+  }
+}
+
+async function doTaskAutoAccount(btn, uid) {
+  if (!uid) return;
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '执行中…'; }
+  try {
+    const d = await api('accounts/' + encodeURIComponent(uid) + '/tasks/auto_all', { method: 'POST' });
+    const sum = (d && d.summary) || {};
+    const parts = ['完成 ' + (sum.done || 0) + ' 项（已验证）'];
+    if (sum.partial) parts.push('部分完成 ' + sum.partial);
+    if (sum.manual) parts.push('需手动 ' + sum.manual);
+    if (sum.locked) parts.push('未解锁 ' + sum.locked);
+    if (sum.failed) parts.push('失败 ' + sum.failed);
+    toast('本账号一键完成：' + parts.join(' · '), (sum.failed || sum.partial) ? 'warn' : 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  finally {
+    if (btn) { btn.disabled = false; btn.textContent = old || '一键完成本账号'; }
+    $('btnScanAll').click();
+  }
+}
+
+const qcListHost = $('qcList');
+if (qcListHost && typeof qcListHost.addEventListener === 'function') qcListHost.addEventListener('click', ev => {
+  const openClient = ev.target.closest('button[data-tc-open]');
+  if (openClient) {
+    toast('正在打开 WorkBuddy 客户端…（若浏览器询问，请允许打开）', 'warn');
+    try { window.location.href = 'workbuddy://'; } catch (_) { /* 自定义协议可能被浏览器拦截 */ }
+    return;
+  }
+  const help = ev.target.closest('button[data-tc-help]');
+  if (help) {
+    const [uid, code] = String(help.dataset.tcHelp || '').split('|');
+    const row = help.closest('.qrow');
+    const msg = row ? (row.title || row.querySelector('.msg')?.textContent || '') : '';
+    toast((code ? code + '：' : '') + (msg || '需在官方客户端完成对应操作'), 'warn');
+    return;
+  }
+  const acc = ev.target.closest('button[data-tc-auto-acc]');
+  if (acc) { doTaskAutoAccount(acc, acc.dataset.tcAutoAcc); return; }
+  const one = ev.target.closest('button[data-tc-auto]');
+  if (one) {
+    const [uid, code] = String(one.dataset.tcAuto || '').split('|');
+    if (one.textContent.trim() === '领取') doTaskClaimOne(one, uid, code);
+    else doTaskAutoOne(one, uid, code);
+  }
+});
 // 扫描结果 → 分组条目（无执行状态）
 //
 // 三类合起来 = 每个账号的全部未完成任务，保证不漏项：
@@ -3058,11 +3168,11 @@ function groupItems(d) {
     const rows = [];
     for (const t of (a.growth || [])) {
       GROWTH_TITLES[t.task_code] = t.title || t.task_code;
-      rows.push({ kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: 'scan', action: t.action || '' });
+      rows.push({ uid: a.uid, kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: 'scan', action: t.action || '', title: t.title, message: t.task_desc || t.description || '' });
     }
     for (const t of (a.growth_locked || [])) {
       GROWTH_TITLES[t.task_code] = t.title || t.task_code;
-      rows.push({ kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: 'locked', unlock: t.unlock_at, action: t.action || '' });
+      rows.push({ uid: a.uid, kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: 'locked', unlock: t.unlock_at, action: t.action || '', title: t.title });
     }
     for (const t of (a.manual || [])) {
       GROWTH_TITLES[t.task_code] = t.title || t.task_code;
@@ -3072,7 +3182,7 @@ function groupItems(d) {
       const hint = INTL_CLIENT_HINT[t.task_code] || '';
       const desc = t.task_desc || t.description || '';
       const message = hint ? (desc ? hint + '（' + desc + '）' : hint) : desc;
-      rows.push({ kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: act === 'client' ? 'client' : 'manual', message, action: act });
+      rows.push({ uid: a.uid, kind: 'growth', code: t.task_code, prog: t.target ? t.current + '/' + t.target : '—', status: act === 'client' ? 'client' : 'manual', message, action: act, title: t.title, jump: t.jump_url || '' });
     }
     if (rows.length) groups.push({
       uid: a.uid, nick: a.nickname, rows: rows,
@@ -3105,6 +3215,43 @@ const INTL_CLIENT_HINT = {
   expert_summoned: '在 WorkBuddy 客户端召唤任意一个专家并跟它聊一句',
   template_used: '在 WorkBuddy 客户端用任意一个模板发起任务',
 };
+// qrowActionHtml 任务行尾的操作。三类任务必须给三种不同出口：
+//   - 可自动化（auto / claim_only）→ 蓝底「一键完成 / 领取」，点完强制回读；
+//   - 未解锁 → 灰底「待解锁」，到点由调度器执行；
+//   - 需客户端 / 真实操作 → 「指引」按钮，把原因原样告诉用户，绝不伪装成可完成。
+// 没有 uid 的旧队列条目（刷新前的残留）不渲染按钮，避免点到空账号。
+function qrowActionHtml(it) {
+  if (!it || !it.uid) return '<span class="qact"></span>';
+  // 队列执行中（pending/running）不渲染按钮：这一行正被后台改写，
+  // 再点一次只会撞上 per-account 锁并弹 409。
+  if (it.status === 'pending' || it.status === 'running') return '<span class="qact"></span>';
+  if (it.status === 'locked') {
+    return '<span class="qact">' + UI.off('待解锁', it.unlock ? '上游锁定至 ' + it.unlock : '上游未解锁') + '</span>';
+  }
+  if (it.status === 'done' || it.status === 'claimed' || it.claimed || it.status === 'skipped') {
+    return '<span class="qact"></span>';
+  }
+  if (it.action === 'claim_only') {
+    return '<span class="qact">' + UI.act('data-tc-auto', it.uid + '|' + it.code, '领取',
+      '进度已达标，直接领取奖励') + '</span>';
+  }
+  if (it.action === 'auto') {
+    return '<span class="qact">' + UI.act('data-tc-auto', it.uid + '|' + it.code, '一键完成',
+      '执行该任务的自动动作，完成后强制回读验证') + '</span>';
+  }
+  if (it.status === 'client') {
+    // 客户端行为类：面板无法代做，但可以把用户送到客户端；
+    // 「指引」保留在 title 里，避免一行堆两个按钮。
+    return '<span class="qact">' + UI.act('data-tc-open', it.uid + '|' + it.code, '去客户端',
+      it.message || '在 WorkBuddy 客户端完成对应操作后回来刷新') + '</span>';
+  }
+  if (it.status === 'manual') {
+    return '<span class="qact">' + UI.sub('data-tc-help', it.uid + '|' + it.code, '指引',
+      it.message || '需真实操作，网关无法代做') + '</span>';
+  }
+  return '<span class="qact"></span>';
+}
+
 function qrowHTML(it) {
   const isSchool = it.kind === 'school';
   const title = isSchool ? '开学季闭环' : (GROWTH_TITLES[it.code] || it.code);
@@ -3143,6 +3290,7 @@ function qrowHTML(it) {
     '<span class="prog">' + esc(prog) + '</span>' +
     '<span class="st"><span class="qdot ' + dotCls + '"></span>' + stWord + '</span>' +
     '<span class="msg">' + esc(msg) + '</span>' +
+    qrowActionHtml(it) +
     '</div>';
 }
 function renderQueue(groups, progress, emptyTitle, emptyDesc) {
@@ -3175,8 +3323,12 @@ function renderQueue(groups, progress, emptyTitle, emptyDesc) {
     }
     const gtag = g.global ? '<span class="tag mute" style="margin-left:6px">国际版（global）</span>' : '';
     const uid = g.uid || '';
+    const quick = runnable > 0
+      ? UI.act('data-tc-auto-acc', uid, '一键完成本账号',
+        '只执行该账号的可自动任务；每项完成后强制回读验证')
+      : '<span class="note" title="该账号当前没有可自动执行的任务">无可自动项</span>';
     return '<div class="qgroup"><header><span class="nm">' + esc(g.nick || uid.slice(0, 12) || '未知账号') +
-      gtag + '</span><span class="cnt">' + cnt + '</span></header>' +
+      gtag + '</span><span class="cnt">' + cnt + '</span><span class="qa">' + quick + '</span></header>' +
       g.rows.map(qrowHTML).join('') + '</div>';
   }).join('');
   const sum = [total + (progress ? ' 项队列任务' : ' 项可自动执行')];
@@ -3200,7 +3352,7 @@ function groupsFromQueue(items) {
   for (const it of items) {
     if (!by.has(it.uid)) by.set(it.uid, { uid: it.uid, nick: it.nickname, rows: [] });
     by.get(it.uid).rows.push({
-      kind: it.kind, code: it.code,
+      uid: it.uid, kind: it.kind, code: it.code,
       prog: it.kind === 'school' ? '—' : '',
       status: it.status, message: it.message,
       action: it.action,
@@ -3866,6 +4018,7 @@ function renderOfficialChart(series) {
 
 if ($('btnUsageOfficial')) $('btnUsageOfficial').onclick = loadUsageOfficial;
 if ($('usOffWindow')) $('usOffWindow').onchange = loadUsageOfficial;
+if ($('btnUsagePlatforms')) $('btnUsagePlatforms').onclick = loadUsagePlatforms;
 
 /* ── 积分构成 ─────────────────────────────────────────────────────── */
 /* 一个账号的余额是若干积分包之和。包按来源命名（「国内运营裂变包」「拉新权益包」
@@ -4506,151 +4659,441 @@ async function loadExpiry(force) {
 if ($('btnExp')) $('btnExp').onclick = () => loadExpiry(true);
 
 // 「刷新」始终实时查（显式 force，不依赖事件对象真值）
-if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);
+if ($('btnPk')) $('btnPk').onclick = () => loadCreditsAll(true);
 
-/* ── Trae / Qoder 积分构成 ──────────────────────────────────────────
-   Trae：上游 ide_user_ent_usage 的逐包明细（每月赠送 / 签到奖励，带到期时间）。
-   Qoder：上游 me/usage 的套餐内 + 附加包两组 Credits。 */
-async function loadPkIdea(quiet) {
-  const st = $('pkIdeaState'), box = $('pkIdea');
-  if (!st || !box) return;
-  if (!quiet) { st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">查询中</span>'; box.innerHTML = ''; }
-  try {
-    const [td, qd, qa] = await Promise.all([
-      api('trae/credits').catch(() => null),
-      api('ide/qoder/usage').catch(() => null),
-      api('ide/qoder/accounts').catch(() => null),
-    ]);
-    const tarr = (td && td.accounts) || [];
-    const parts = [];
-    const cardSub = s => '<div class="sub">' + s + '</div>';
-
-    // Trae：与 WorkBuddy 同一套 pk-card / mixbar，不再用文字表格
-    parts.push('<div class="pad"><div class="ck-group">Trae</div></div>');
-    if (!tarr.length) {
-      parts.push('<div class="state">未找到 Trae 账号。</div>');
-    } else {
-      const cards = tarr.map(a => {
-        const packs = a.packs || [];
-        if (!packs.length) {
-          return '<div class="pk-card"><div class="who"><span class="nm">' + esc(a.name || '未命名') +
-            '</span><span class="realm">Trae</span></div><div class="err">' +
-            (a.has_balance ? '无逐包明细' : '无法获取（凭证过期或接口异常）') + '</div></div>';
-        }
-        let remain = 0, total = 0;
-        for (const p of packs) {
-          if (!p.unlimited) {
-            remain += Number(p.remaining || 0);
-            total += Number(p.limit || 0);
-          }
-        }
-        // 同类积分包合并成一段（Trae 每天一个「签到奖励」包，30 个包逐条列图例会淹掉卡片）
-        const groups = [];
-        for (const p of packs) {
-          const key = String(p.desc || '积分包');
-          let g = groups.find(x => x.key === key);
-          if (!g) { g = { key, remain: 0, total: 0, n: 0, unlimited: false, end: 0 }; groups.push(g); }
-          g.n++;
-          g.remain += Number(p.remaining || 0);
-          g.total += Number(p.limit || 0);
-          if (p.unlimited) g.unlimited = true;
-          const t = Number(p.end_time || 0);
-          if (t && (!g.end || t < g.end)) g.end = t;
-        }
-        const sum = Math.max(1, remain);
-        const bar = groups.map((g, i) => {
-          const w = g.unlimited ? 0 : Math.max(0, g.remain);
-          const exp = g.end ? new Date(g.end * 1000).toLocaleDateString('zh-CN') : '不过期';
-          const tip = g.key + (g.n > 1 ? ' x' + g.n : '') + ' 剩余 ' +
-            (g.unlimited ? '∞' : fmtTok(w)) + ' · 到期 ' + exp;
-          return '<i style="width:' + (w / sum * 100).toFixed(2) + '%;background:' + pkColor(i) +
-            '" title="' + esc(tip) + '"></i>';
-        }).join('');
-        const legend = groups.map((g, i) => {
-          const rem = g.unlimited ? '∞' : fmtTok(g.remain);
-          const exp = g.end ? new Date(g.end * 1000).toLocaleDateString('zh-CN') : '不过期';
-          return '<span><i style="background:' + pkColor(i) + '"></i>' + esc(g.key) +
-            (g.n > 1 ? ' x' + g.n : '') + ' · 剩余 ' + rem + ' · 到期 ' + esc(exp) + '</span>';
-        }).join('');
-        const timed = packs.filter(p => p.end_time).sort((x, y) => Number(x.end_time) - Number(y.end_time));
-        const next = timed[0];
-        const gain = packs.find(p => /签到|checkin|daily/i.test(String(p.desc || '')));
-        const gainText = gain
-          ? '签到奖励：+' + (gain.unlimited ? '不限量' : fmtTok(Number(gain.limit || 0)) + ' Credits/天')
-          : '签到奖励：见积分包';
-        const expText = next
-          ? '最近到期：' + new Date(next.end_time * 1000).toLocaleDateString('zh-CN')
-          : '到期：不过期';
-        return '<div class="pk-card">' +
-          '<div class="who"><span class="nm">' + esc(a.name || 'Trae 账号') +
-          '</span><span class="realm">Trae</span></div>' +
-          '<div class="big">' + fmtTok(remain) + '</div>' +
-          cardSub('共 ' + fmtTok(total) + ' · ' + packs.length + ' 个包') +
-          '<div class="mixbar">' + bar + '</div>' +
-          '<div class="pk-legend">' + legend + '</div>' +
-          '<div class="note" style="margin-top:7px">' + gainText + ' · ' + expText + '</div>' +
-          '</div>';
-      }).join('');
-      parts.push('<div class="pk-grid">' + cards + '</div>');
+/* ── 各平台额度用量（用量页）─────────────────────────────────────────
+   修复「用量页只有 WorkBuddy」：把五个平台的官方额度快照拉到同一张表。
+   逐请求明细只有 WorkBuddy 上游开放；其余平台只能读到额度，说明列如实标注，
+   不把「拿不到」写成 0。数据源与「积分构成」共用 loadCreditsAll 的缓存。 */
+function renderUsagePlatforms(data) {
+  const body = $('usPlatBody');
+  if (!body) return;
+  const plats = (data && data.platforms) || [];
+  const rows = [];
+  let sumRemain = 0, sumTotal = 0, sumUsed = 0, accounts = 0;
+  for (const p of plats) {
+    for (const a of (p.accounts || [])) {
+      accounts++;
+      const remain = Number(a.remain || 0);
+      const total = Number(a.total || 0);
+      const used = a.used == null ? Math.max(0, total - remain) : Number(a.used || 0);
+      sumRemain += remain; sumTotal += total; sumUsed += used;
+      rows.push({ p, a, remain, total, used });
     }
-
-    // Qoder：号池逐号查，条形展示套餐内 / 附加（签到）两组 Credits
-    parts.push('<div class="pad"><div class="ck-group">Qoder</div></div>');
-    const qarr = (qa && qa.accounts) || (qd && qd.email ? [{ email: qd.email, name: qd.name, current: true }] : []);
-    if (!qarr.length) {
-      parts.push('<div class="state">未找到 Qoder 账号。</div>');
-    } else {
-      const usages = await Promise.all(qarr.map(a => {
-        if (a.current && qd && qd.phase === 'ok') return Promise.resolve(qd);
-        return api('ide/qoder/usage?email=' + encodeURIComponent(a.email || '')).catch(() => null);
-      }));
-      const cards = qarr.map((a, i) => {
-        const u = usages[i];
-        if (!u || u.phase !== 'ok') {
-          return '<div class="pk-card"><div class="who"><span class="nm">' +
-            esc(a.name || a.email || 'Qoder 账号') +
-            '</span><span class="realm">Qoder</span></div><div class="sub">' + esc(a.email || '') +
-            '</div><div class="err">' + esc((u && u.msg) || '额度查询失败') + '</div></div>';
-        }
-        const pkg = u.user_quota || {}, addon = u.add_on_quota || {};
-        const pkgRemain = Number(pkg.remaining || 0), addonRemain = Number(addon.remaining || 0);
-        const pkgUsed = Number(pkg.used || 0), addonUsed = Number(addon.used || 0);
-        const pkgTotal = Number(pkg.total || 0), addonTotal = Number(addon.total || 0);
-        const remain = pkgRemain + addonRemain;
-        const total = pkgTotal + addonTotal;
-        const sum = Math.max(1, remain);
-        const bar = '<i style="width:' + (pkgRemain / sum * 100).toFixed(2) +
-          '%;background:#4f8cff" title="套餐内 ' + fmtTok(pkgRemain) + '"></i>' +
-          '<i style="width:' + (addonRemain / sum * 100).toFixed(2) +
-          '%;background:#25b08b" title="附加/签到 ' + fmtTok(addonRemain) + '"></i>';
-        const legend = '<span><i style="background:#4f8cff"></i>套餐内 ' + fmtTok(pkgRemain) + '</span>' +
-          '<span><i style="background:#25b08b"></i>附加/签到 ' + fmtTok(addonRemain) + '</span>';
-        const expMs = Number(u.expires_at_ms || 0);
-        const expText = !expMs ? '到期：不过期（上游未设）' :
-          (new Date(expMs).getFullYear() >= 9999 ? '到期：不过期' :
-            '到期：' + new Date(expMs).toLocaleDateString('zh-CN'));
-        return '<div class="pk-card">' +
-          '<div class="who"><span class="nm">' + esc(a.name || a.email || 'Qoder 账号') + '</span>' +
-          (a.current ? '<span class="realm">当前</span>' : '<span class="realm">Qoder</span>') + '</div>' +
-          '<div class="sub">' + esc(a.email || '') + '</div>' +
-          '<div class="big">' + fmtTok(remain) + '</div>' +
-          cardSub('共 ' + fmtTok(total) + ' · 已用 ' + fmtTok(pkgUsed + addonUsed) + ' · ' +
-            esc(u.plan_tier_name || u.plan_tier || '—')) +
-          '<div class="mixbar">' + bar + '</div>' +
-          '<div class="pk-legend">' + legend + '</div>' +
-          '<div class="note" style="margin-top:7px">签到奖励：+100 Credits/日 · ' + expText + '</div>' +
-          '</div>';
-      }).join('');
-      parts.push('<div class="pk-grid">' + cards + '</div>');
-    }
-    box.innerHTML = parts.join('');
-    st.hidden = true;
-    if ($('pkIdeaNote')) $('pkIdeaNote').textContent = '';
-  } catch (e) {
-    st.hidden = false; st.className = 'state err'; st.textContent = e.message;
+  }
+  const pct = sumTotal > 0 ? (sumUsed / sumTotal * 100) : 0;
+  $('usPlatKpis').innerHTML =
+    usKpi(String(plats.length), '平台数', 'c-accent', plats.map(p => p.name).join(' · ')) +
+    usKpi(String(accounts), '账号数', 'c-soft', '跨五个平台') +
+    usKpi(creditsNum(sumRemain), '剩余额度', 'c-ok', '各平台官方快照之和') +
+    usKpi(creditsNum(sumUsed) + ' / ' + creditsNum(sumTotal), '已用 / 总量', 'c-accent',
+      '整体使用率 ' + pct.toFixed(1) + '%',
+      '<div class="kbar"><i style="width:' + Math.max(0, Math.min(100, pct)).toFixed(2) +
+      '%;background:var(--accent)"></i></div>');
+  body.innerHTML = rows.map(({ p, a, remain, total, used }) => {
+    const rate = total > 0 ? Math.max(0, Math.min(100, used / total * 100)) : 0;
+    const color = rate >= 90 ? 'var(--bad)' : rate >= 70 ? 'var(--warn)' : 'var(--ok)';
+    return '<tr>' +
+      '<td class="mark" aria-hidden="true"></td>' +
+      '<td class="who"><div class="plat-cell"><span class="plat-badge" data-p="' + p.id + '">' +
+        esc(p.name) + '</span><span class="nm">' + esc(a.name || '未命名') + '</span></div>' +
+        '<div class="id">' + esc(a.sub || '') + (a.displayId ? ' · ' + esc(a.displayId) : '') + '</div></td>' +
+      '<td class="num"><b>' + creditsNum(used) + '</b></td>' +
+      '<td class="num">' + creditsNum(total) + '</td>' +
+      '<td class="num"><b>' + creditsNum(remain) + '</b></td>' +
+      '<td class="num">' + (total > 0 ? rate.toFixed(1) + '%' : '—') +
+        '<span class="pctbar"><i style="width:' + rate.toFixed(2) + '%;background:' + color + '"></i></span></td>' +
+      '<td class="muted">' + esc(a.source || '—') + '</td></tr>';
+  }).join('') || '<tr><td colspan="7" class="empty">暂无平台额度数据</td></tr>';
+  if ($('usPlatNote')) {
+    $('usPlatNote').textContent = plats.length + ' 个平台 · ' + accounts + ' 个账号 · 更新于 ' +
+      new Date().toLocaleTimeString('zh-CN', { hour12: false });
   }
 }
-if ($('btnPkIdea')) $('btnPkIdea').onclick = () => loadPkIdea(false);
+
+async function loadUsagePlatforms() {
+  const body = $('usPlatBody');
+  if (!body) return;
+  body.innerHTML = '<tr><td colspan="7" class="empty">查询中…</td></tr>';
+  try {
+    const data = await loadCreditsAll(false);
+    renderUsagePlatforms(data || creditsAllData);
+  } catch (e) {
+    body.innerHTML = '<tr><td colspan="7" class="empty">读取平台用量失败：' + esc(e.message) + '</td></tr>';
+  }
+}
+
+/* ── 积分构成 · 全平台 ────────────────────────────────────────────────
+   用户反馈：这一页标题写着「Trae / Qoder」，WorkBuddy 被拆到下面两块，
+   MiniMax / CodeArts 根本看不到；而且 WorkBuddy 卡片和 Qoder 卡片字段不一样。
+   现在统一成一套：五个平台（WorkBuddy / Qoder / Trae / MiniMax / CodeArts）
+   全部进同一个网格，每张卡都是「剩余大字 + 总量/已用/包数 + 来源彩条 + 签到可得/到期」。
+   数据全部来自各平台官方接口；没有逐包明细的平台（CodeArts）只给总量，不伪造。 */
+const CREDITS_PLATFORMS = [
+  { id: 'workbuddy', name: 'WorkBuddy' },
+  { id: 'qoder', name: 'Qoder' },
+  { id: 'trae', name: 'Trae' },
+  { id: 'minimax', name: 'MiniMax' },
+  { id: 'codearts', name: 'CodeArts（华为）' },
+];
+const CREDITS_ALL_TTL = 30 * 1000;
+let creditsAllData = null, creditsAllAt = 0, creditsAllInflight = null;
+
+function creditsNum(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return '—';
+  return n.toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+}
+
+function creditsPlat(id) {
+  return CREDITS_PLATFORMS.find(p => p.id === id) || { id, name: id };
+}
+
+// creditsSegmentsHtml 画来源/到期彩条。宽度按「各段剩余之和」算，不按总量：
+// 总量里含已用部分，按总量算会让彩条永远填不满，看起来像数据缺失。
+function creditsSegmentsHtml(segs) {
+  const list = (segs || []).filter(s => Number(s.remain) > 0);
+  const sum = list.reduce((n, s) => n + Number(s.remain || 0), 0);
+  if (!sum) return '';
+  return list.map(s => {
+    const w = Math.max(0.8, Number(s.remain || 0) / sum * 100);
+    const exp = s.expiresAt ? ('到期 ' + pkExpiryDateTime(s.expiresAt)) : '无到期时间';
+    const tip = s.label + '\n剩余 ' + creditsNum(s.remain) +
+      (s.total != null ? ' / 总量 ' + creditsNum(s.total) : '') + '\n' + exp;
+    return '<i style="width:' + w.toFixed(2) + '%;background:' + (s.color || 'var(--accent)') +
+      '" title="' + esc(tip) + '"></i>';
+  }).join('');
+}
+
+// creditsLegendSegs 图例按「来源名」归并：WorkBuddy 一天一个裂变包，
+// 逐包列图例会重复 8 行同一个名字（用户根本看不出差别）。彩条仍按到期日
+// 逐段画，图例只保留来源汇总 + 最近到期。
+function creditsLegendSegs(segs) {
+  const m = new Map();
+  for (const s of (segs || [])) {
+    const key = String(s.label || '积分');
+    let g = m.get(key);
+    if (!g) { g = { label: key, remain: 0, total: 0, expiresAt: null, color: s.color }; m.set(key, g); }
+    g.remain += Number(s.remain || 0);
+    if (s.expiresAt && (!g.expiresAt || s.expiresAt < g.expiresAt)) g.expiresAt = s.expiresAt;
+  }
+  return [...m.values()].sort((a, b) => b.remain - a.remain);
+}
+
+function creditsLegendHtml(segs) {
+  const list = (segs || []).filter(s => Number(s.remain) > 0);
+  if (!list.length) return '';
+  return list.slice(0, 8).map(s => {
+    const exp = s.expiresAt ? (' · ' + esc(pkExpiryText(s.expiresAt))) : '';
+    return '<span><i style="background:' + (s.color || 'var(--accent)') + '"></i>' +
+      esc(s.label) + ' · ' + creditsNum(s.remain) + exp + '</span>';
+  }).join('') + (list.length > 8 ? '<span>另 ' + (list.length - 8) + ' 个包</span>' : '');
+}
+
+/* creditsCardHtml 所有平台共用的一张卡。字段顺序固定，跨平台可横向比较：
+   who（账号 + 平台徽标 + 计划/状态）→ 剩余大字 → 总量/已用/包数 → 彩条 → 图例 → 说明。 */
+function creditsCardHtml(plat, a) {
+  a = a || {};
+  const badge = '<span class="plat-badge" data-p="' + plat.id + '">' + esc(plat.name) + '</span>';
+  if (a.error) {
+    return '<div class="pk-card" data-p="' + plat.id + '">' +
+      '<div class="who"><span class="nm">' + esc(a.name || '未命名') + '</span>' + badge + '</div>' +
+      '<div class="err">' + esc(a.error) + '</div>' +
+      (a.source ? '<div class="note">' + esc(a.source) + '</div>' : '') + '</div>';
+  }
+  const remain = Number(a.remain || 0);
+  const total = Number(a.total || 0);
+  const used = a.used == null ? (total > remain ? total - remain : 0) : Number(a.used);
+  const segs = a.segments || [];
+  const plan = a.plan ? '<span class="tag mute">' + esc(a.plan) + '</span>' : '';
+  const sub = '总量 ' + creditsNum(total) + ' · 已用 ' + creditsNum(used) +
+    ' · ' + (a.packCount != null ? a.packCount : segs.length) + ' 个包';
+  return '<div class="pk-card" data-p="' + plat.id + '">' +
+    '<div class="who"><span class="nm">' + esc(a.name || '未命名') + '</span>' + badge + plan +
+      (a.checkedIn ? '<span class="tag ok">今日已签</span>' : '') + '</div>' +
+    (a.sub ? '<div class="sub">' + esc(a.sub) + '</div>' : '') +
+    '<div class="big">' + creditsNum(remain) +
+      (total > 0 ? '<span class="of"> / ' + creditsNum(total) + '</span>' : '') + '</div>' +
+    '<div class="sub">' + esc(sub) + '</div>' +
+    '<div class="mixbar">' + creditsSegmentsHtml(segs) + '</div>' +
+    '<div class="pk-legend">' + creditsLegendHtml(creditsLegendSegs(segs)) + '</div>' +
+    (a.note ? '<div class="note" style="margin-top:7px">' + esc(a.note) + '</div>' : '') +
+    (a.source ? '<div class="note" style="margin-top:3px;color:var(--ink-3)">' + esc(a.source) + '</div>' : '') +
+    '</div>';
+}
+
+function creditsNormWorkBuddy(pkg, ov) {
+  const out = [];
+  const doneMap = new Map(((ov && ov.accounts) || []).map(x => [String(x.uid || ''), !!x.checkin_done]));
+  for (const a of ((pkg && pkg.accounts) || [])) {
+    const uid = String(a.uid || '');
+    if (a.error) {
+      out.push({ id: uid, name: a.nickname || uid.slice(0, 8), error: a.error, source: '上游 packages 查询失败' });
+      continue;
+    }
+    const srcs = pkBySource(a.packages || []);
+    const colorByKey = new Map(srcs.map((s, i) => [s.key, pkColor(i)]));
+    const colorOf = name => {
+      const hit = srcs.find(s => s.name === name);
+      return hit ? colorByKey.get(hit.key) : pkColor(0);
+    };
+    const segs = pkAccountSegments(a, Date.now()).map(s => ({
+      label: s.source || '积分',
+      remain: s.amount,
+      total: null,
+      expiresAt: s.expiresAt,
+      color: colorOf(s.source),
+    }));
+    const timed = segs.filter(s => s.expiresAt).sort((x, y) => x.expiresAt - y.expiresAt);
+    const next = timed[0];
+    out.push({
+      id: uid,
+      displayId: uid ? uid.slice(0, 12) : '',
+      name: identName(a.nickname, uid, '未命名'),
+      sub: '上游逐包',
+      plan: a.realm === 'global' ? '国际版' : '国内版',
+      remain: Number(a.remain || 0),
+      total: Number(a.size || 0),
+      used: Math.max(0, Number(a.size || 0) - Number(a.remain || 0)),
+      checkedIn: doneMap.get(uid) || false,
+      packCount: (a.packages || []).length,
+      segments: segs,
+      note: '签到 +100/日 · ' + (next ? '最近到期 ' + pkExpiryText(next.expiresAt) : '无近期到期批次'),
+      source: '逐包合计（与网关余额可能有少量差异）',
+    });
+  }
+  return out;
+}
+
+function creditsTraeGroups(packs) {
+  const m = new Map();
+  for (const p of (packs || [])) {
+    const key = String(p.desc || '积分包');
+    let g = m.get(key);
+    if (!g) { g = { label: key, remain: 0, total: 0, expiresAt: null }; m.set(key, g); }
+    g.remain += Number(p.remaining || 0);
+    g.total += Number(p.limit || 0);
+    const t = Number(p.end_time || 0) * 1000;
+    if (t && (!g.expiresAt || t < g.expiresAt)) g.expiresAt = t;
+  }
+  return [...m.values()].sort((a, b) => b.remain - a.remain)
+    .map((g, i) => ({ ...g, color: pkColor(i) }));
+}
+
+function creditsNormTrae(td) {
+  return ((td && td.accounts) || []).map(a => {
+    if (a.credential_expired) {
+      return { id: a.user_id, name: a.name || a.user_id, error: '凭证已过期，余额只能读本地快照', source: 'Trae 凭证' };
+    }
+    const segs = creditsTraeGroups(a.packs || []);
+    const remain = a.has_balance ? Number(a.balance || 0) : segs.reduce((n, s) => n + s.remain, 0);
+    const total = Number(a.limit || 0) || segs.reduce((n, s) => n + s.total, 0);
+    const used = Number(a.used || 0) || Math.max(0, total - remain);
+    const timed = segs.filter(s => s.expiresAt).sort((x, y) => x.expiresAt - y.expiresAt);
+    return {
+      id: a.user_id,
+      displayId: a.user_id || '',
+      name: a.name || a.user_id,
+      sub: a.balance_source === 'local' ? '本地快照（可能滞后）' : '上游实时',
+      plan: a.balance_source === 'local' ? '快照' : '',
+      remain, total, used,
+      checkedIn: !!a.checked_in,
+      packCount: (a.packs || []).length,
+      segments: segs,
+      note: '签到 +' + creditsNum(a.checkin_credits || 100) + '/日 · ' +
+        (timed[0] ? '最近到期 ' + pkExpiryText(timed[0].expiresAt) : '到期：不过期'),
+      source: '逐包明细：上游 ide_user_ent_usage',
+    };
+  });
+}
+
+function creditsNormQoder(qa, usages, qc) {
+  const arr = ((qa && qa.accounts) || []).slice();
+  if (!arr.length && qa && qa.current_email) {
+    arr.push({ email: qa.current_email, name: qa.current_name || '当前登录', current: true });
+  }
+  const doneMap = new Map(((qc && qc.results) || []).map(r => [String(r.email || '').toLowerCase(), !!r.checked_in_today]));
+  return arr.map((a, i) => {
+    const email = String(a.email || '');
+    const u = usages[i];
+    const name = identName(a.name, email, '未命名');
+    if (!u || u.phase !== 'ok') {
+      return { id: email, name, error: (u && u.msg) || '额度查询失败', source: 'Qoder me/usage' };
+    }
+    const pkg = u.user_quota || {}, addon = u.add_on_quota || {};
+    const pkgRemain = Number(pkg.remaining || 0), addonRemain = Number(addon.remaining || 0);
+    const pkgTotal = Number(pkg.total || 0), addonTotal = Number(addon.total || 0);
+    const remain = pkgRemain + addonRemain;
+    const total = pkgTotal + addonTotal;
+    const used = Number(pkg.used || 0) + Number(addon.used || 0) || Math.max(0, total - remain);
+    const plan = u.plan_tier_name || u.plan_tier || '';
+    const free = String(u.plan_tier || '').toLowerCase() === 'free';
+    return {
+      id: email,
+      displayId: '',
+      name,
+      sub: (a.current ? '当前登录' : '号池账号') + ' · ' + identLabel(email, ''),
+      plan: plan,
+      remain, total, used,
+      checkedIn: doneMap.get(email.toLowerCase()) || false,
+      packCount: 2,
+      segments: [
+        { label: '套餐内', remain: pkgRemain, total: pkgTotal, expiresAt: null, color: '#4f8cff' },
+        { label: '附加 / 签到', remain: addonRemain, total: addonTotal, expiresAt: null, color: '#25b08b' },
+      ],
+      note: '签到 +100/日' + (free ? ' · Free 账号官方已不发放' : '（Pro/付费）') +
+        ' · 到期：' + (u.expires_at_ms && new Date(u.expires_at_ms).getFullYear() < 9999
+          ? new Date(u.expires_at_ms).toLocaleDateString('zh-CN') : '不过期'),
+      source: '官方只给「套餐内 / 附加」两桶，无逐包明细',
+    };
+  });
+}
+
+function creditsNormMiniMax(md) {
+  return ((md && md.accounts) || []).map(a => {
+    const id = a.id || a.user_id || '';
+    const name = identName(a.user_name || a.label, a.email || a.user_id || id, 'MiniMax 账号');
+    if (a.error) return { id, name, error: a.error, source: 'MiniMax 账号接口' };
+    const details = (a.credits_details || []).filter(d => Number(d.remaining) > 0);
+    const byDay = new Map();
+    for (const d of details) {
+      const exp = Number(d.expire_at_ms || 0);
+      const key = exp ? pkDayKey(exp) : 'no-expiry';
+      let g = byDay.get(key);
+      if (!g) { g = { label: exp ? key.slice(5) + ' 到期' : '无到期', remain: 0, total: 0, expiresAt: exp || null }; byDay.set(key, g); }
+      g.remain += Number(d.remaining || 0);
+      g.total += Number(d.granted || 0);
+      if (exp && (!g.expiresAt || exp < g.expiresAt)) g.expiresAt = exp;
+    }
+    const segs = [...byDay.values()].sort((x, y) => (x.expiresAt || 0) - (y.expiresAt || 0))
+      .map((g, i) => ({ ...g, color: pkColor(i) }));
+    const remain = Number(a.credits || 0);
+    const total = Number(a.credits_total || 0);
+    const next = segs.find(s => s.expiresAt);
+    return {
+      id, displayId: identLabel(id, id), name,
+      sub: '官方逐包',
+      plan: a.region === 'global' ? '国际版' : '国内版',
+      remain, total, used: Math.max(0, total - remain),
+      checkedIn: !!a.claimed_today,
+      packCount: (a.credits_details || []).length,
+      segments: segs.length ? segs : [{ label: '积分', remain, total, expiresAt: null, color: '#25b08b' }],
+      note: '签到 +' + creditsNum(a.points_today || 400) + '/日（第 4/7 天 1000）· ' +
+        (next ? '最近到期 ' + pkExpiryText(next.expiresAt) : '无近期到期批次'),
+      source: '逐包明细：官方 /credit/details',
+    };
+  });
+}
+
+function creditsNormCodeArts(cd) {
+  return ((cd && cd.accounts) || []).map(a => {
+    const id = String(a.id || '');
+    const name = identName(a.label || a.nickname, a.email, 'CodeArts 账号');
+    const remain = Number(a.credits || 0);
+    const total = Number(a.credits_total || 0);
+    const used = Number(a.credits_used || 0) || Math.max(0, total - remain);
+    const bad = a.login_expired || caStatusPhrase(a) === '需重新登录';
+    return {
+      id, displayId: id, name,
+      sub: bad ? '华为云 · 会话失效' : '华为云',
+      plan: bad ? '需重登' : '在线',
+      remain, total, used,
+      checkedIn: !!a.checked_in_today,
+      packCount: 1,
+      segments: [{ label: '积分总包', remain, total, expiresAt: null, color: '#e2607a' }],
+      note: '签到 +' + creditsNum(a.daily_bonus || 100) + '/日 · ' +
+        (bad ? '会话已失效，点「登录并签到」' : '官方只给总量，无逐包明细'),
+      source: '官方 package/overview（仅总量）',
+    };
+  });
+}
+
+// loadCreditsAll 一次拉齐五个平台的积分构成。所有接口都走面板已有缓存，
+// 不新增上游压力；WorkBuddy 的 packages 同时喂给下面的「到期分布 / 账号对比」。
+async function loadCreditsAll(force) {
+  const st = $('pkIdeaState'), box = $('pkIdea');
+  if (!st || !box) return;
+  if (!force && creditsAllData && Date.now() - creditsAllAt < CREDITS_ALL_TTL) {
+    renderCreditsAll(creditsAllData);
+    return creditsAllData;
+  }
+  if (creditsAllInflight) return creditsAllInflight;
+  st.hidden = false; st.className = 'state'; st.innerHTML = '<span class="dots">查询中</span>';
+  box.innerHTML = '';
+  const job = (async () => {
+    const [pkg, td, qa, mm, ca, ov, cfg, qc] = await Promise.all([
+      api('packages').catch(e => ({ error: e.message })),
+      api('trae/credits').catch(e => ({ error: e.message })),
+      api('ide/qoder/accounts').catch(e => ({ error: e.message })),
+      api('ide/minimax/accounts').catch(e => ({ error: e.message })),
+      api('ide/codearts/accounts').catch(e => ({ error: e.message })),
+      api('overview').catch(() => null),
+      api('config').catch(() => null),
+      api('ide/qoder/checkin-status').catch(() => null),
+    ]);
+    const qarr = ((qa && qa.accounts) || []).slice();
+    if (!qarr.length && qa && qa.current_email) qarr.push({ email: qa.current_email, name: qa.current_name, current: true });
+    const qusages = await Promise.all(qarr.map(a =>
+      api('ide/qoder/usage?email=' + encodeURIComponent(a.email || '')).catch(() => null)));
+    const detailLimit = pkDetailLimit(cfg && cfg.config);
+    const data = {
+      generated: new Date().toISOString(),
+      packages: pkg,
+      detailLimit,
+      platforms: [
+        { ...CREDITS_PLATFORMS[0], accounts: creditsNormWorkBuddy(pkg, ov), error: pkg && pkg.error },
+        { ...CREDITS_PLATFORMS[1], accounts: creditsNormQoder(qa, qusages, qc), error: qa && qa.error },
+        { ...CREDITS_PLATFORMS[2], accounts: creditsNormTrae(td), error: td && td.error },
+        { ...CREDITS_PLATFORMS[3], accounts: creditsNormMiniMax(mm), error: mm && mm.error },
+        { ...CREDITS_PLATFORMS[4], accounts: creditsNormCodeArts(ca), error: ca && ca.error },
+      ],
+    };
+    creditsAllData = data;
+    creditsAllAt = Date.now();
+    renderCreditsAll(data);
+    return data;
+  })();
+  creditsAllInflight = job;
+  try { await job; } finally { creditsAllInflight = null; }
+}
+
+function renderCreditsAll(data) {
+  const st = $('pkIdeaState'), box = $('pkIdea');
+  if (!st || !box) return;
+  const plats = (data && data.platforms) || [];
+  let totalAccounts = 0;
+  box.innerHTML = plats.map(p => {
+    const accs = p.accounts || [];
+    totalAccounts += accs.length;
+    const remain = accs.reduce((n, a) => n + Number(a.remain || 0), 0);
+    const total = accs.reduce((n, a) => n + Number(a.total || 0), 0);
+    const sum = accs.length
+      ? accs.length + ' 个账号 · 剩余 ' + creditsNum(remain) + ' / 总量 ' + creditsNum(total)
+      : '未添加账号';
+    const body = accs.length
+      ? '<div class="pk-grid">' + accs.map(a => creditsCardHtml(p, a)).join('') + '</div>'
+      : '<div class="empty">' + (p.error ? esc(p.error) : '未添加账号') + '</div>';
+    return '<div class="pk-plat" data-p="' + p.id + '">' +
+      '<div class="pk-plat-h"><span class="plat-badge" data-p="' + p.id + '">' + esc(p.name) + '</span>' +
+      '<span class="sum">' + esc(sum) + '</span></div>' + body + '</div>';
+  }).join('');
+  st.hidden = true;
+  if ($('pkIdeaNote')) {
+    $('pkIdeaNote').textContent = totalAccounts + ' 个账号 · 更新于 ' +
+      new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  }
+  // WorkBuddy 的到期分布 / 账号对比仍用同一份 packages 数据（不额外打上游）。
+  if (data && data.packages && !data.packages.error) {
+    lastPackages = data.packages;
+    lastPackagesAt = Date.now();
+    lastDetailLimit = pkDetailLimitValue(data.detailLimit);
+    renderPackages(data.packages, lastDetailLimit);
+  }
+}
+
+// 兼容旧调用名：go('packages') / btnPkIdea 都走新的全平台聚合。
+async function loadPkIdea(quiet) { return loadCreditsAll(!quiet); }
+if ($('btnPkIdea')) $('btnPkIdea').onclick = () => loadCreditsAll(true);
 
 /* ── IDE 账号（Qoder 切号） ──────────────────────────────────────────
    服务端直接读写本机 Qoder 的 auth.v1.dat（AES-256-GCM + DPAPI 密钥），
@@ -5379,7 +5822,7 @@ async function loadCkWorkBuddy(quiet) {
       api('ide/workbuddy/usage?uid=' + encodeURIComponent(uid)).then(r => {
         if (!r || !r.ok || !r.usage) { cell.innerHTML = '<span class="note">' + esc((r && r.error) || '—') + '</span>'; return; }
         if (r.usage.remaining != null) {
-          cell.innerHTML = '<b>' + r.usage.remaining + '</b>' + (r.usage.total != null ? ' / ' + r.usage.total : '');
+          cell.innerHTML = ckBalHtml(r.usage.remaining, r.usage.total, null, '上游额度');
           return;
         }
         const found = {};
@@ -5443,7 +5886,7 @@ let lastQoderCheckin = null; // 最近一次一键签到的原始响应，用于
 
 const QD_PHASE_ORDER = ['claimed', 'already', 'blocked', 'pending', 'failed', 'login_required', 'error'];
 const QD_PHASE_TEXT = {
-  claimed: '已领取', already: '今日已领', blocked: '额度已被占用（未签到）',
+  claimed: '已领取', already: '今日已领', blocked: '同一人已领（未签到）',
   pending: '待核实', failed: '失败', login_required: '需重新登录', error: '错误',
 };
 // strategy 文案：只在上游真有证据时才说「服务端判定同人」（2026-11-04 实测：
@@ -5747,13 +6190,25 @@ function renderQoderRows(rows, arr, cur, st2, eg) {
         return;
       }
       const total = ((u.user_quota && u.user_quota.remaining) || 0) + ((u.add_on_quota && u.add_on_quota.remaining) || 0);
-      cell.innerHTML = '<b>' + total.toLocaleString('zh-CN') + '</b>' +
-        (u.plan_tier_name ? ' <span class="tag mute">' + esc(u.plan_tier_name) + '</span>' : '');
+      const pkgUsed = (u.user_quota && u.user_quota.used) || 0;
+      const addonUsed = (u.add_on_quota && u.add_on_quota.used) || 0;
+      const pkgTotal = (u.user_quota && u.user_quota.total) || 0;
+      const addonTotal = (u.add_on_quota && u.add_on_quota.total) || 0;
+      const plan = u.plan_tier_name || u.plan_tier || '';
+      const free = String(u.plan_tier || '').toLowerCase() === 'free';
+      cell.innerHTML = ckBalHtml(total, pkgTotal + addonTotal, pkgUsed + addonUsed,
+        (plan ? '计划 ' + plan : '') + (free ? ' · 官方已停发' : ''));
+      const gainCell = list.querySelector('[data-qk-gain="' + CSS.escape(email) + '"]');
+      if (gainCell) {
+        gainCell.innerHTML = free
+          ? '<span class="tag bad">官方已停发</span>'
+          : '<b>+100</b><div class="note">Pro / 付费订阅</div>';
+      }
       const key = email.toLowerCase();
       if (u.plan_tier === 'free' && phaseMap[key] === 'pending' && !doneMap[key] && !quotaMap[key]) {
         const statusCell = cell.closest('[data-qd-row]').querySelector('[data-qd-status]');
-        statusCell.innerHTML = UI.badge('mute2', '○', '未查到可领活动',
-          '上游方案显示为 Free。Qoder 国际版每日 100 Credits 活动面向 Pro 试用及个人付费订阅。具体领取状态以该账号的 Qoder 客户端为准。');
+        statusCell.innerHTML = UI.badge('todo', '!', '官方已停发（Free）',
+          '官方规则：自 2026-11-19 10:00 起，每日 100 Credits 仅面向 Pro 试用期及 Lite/Pro/Pro+/Ultra 个人付费订阅；体验版（Free）不再发放。该账号当前为 Free，点签到不会到账。');
       }
     }).catch(e => { cell.innerHTML = '<span class="note">' + esc(e.message) + '</span>'; });
   });
@@ -6030,6 +6485,9 @@ async function doMainPoolCheckinAll() {
    拉起浏览器，你登录一次；面板把这份 profile 归档到该账号名下，之后每天
    用它拉一次无头浏览器自动点「活动福利 → 每日领取」。 */
 let caPollTimer = null;
+// caLoginIntent 记录本次登录窗口是「添加新号」还是「给某个号登录并签到」。
+// 轮询成功后据此决定是否立刻补一次签到（后端登录后也会自动领，双保险、幂等）。
+let caLoginIntent = null;
 
 /* ── CodeArts 票据寿命展示（C-UI-REPAIR@1 / C-CA-API@1）────────────────
    所有字段直接来自 GET ide/codearts/accounts，前端不派生、不自造同义字段。
@@ -6150,15 +6608,20 @@ function caSummaryHtml(a) {
   const tip = a.needs_manual ? String(a.probe_msg || a.renew_fail_msg || '') : '';
   let ops = '';
   if (phrase === '需重新登录') {
-    ops = UI.act('data-ca-relogin', id, '重新登录', '用这个号自己的身份槽重开登录窗口') +
+    // 会话失效时「重新登录」和「签到」是同一条链路：登录成功后后端会自动领当天份。
+    // 按钮文案直接写「登录并签到」，用户不用再找第二个按钮。
+    ops = UI.act('data-ca-relogin', id, '登录并签到', '重开该号的登录窗口；登录成功后自动保存并领取今天积分') +
       '<span class="ca-link" data-ca-forget="' + esc(id) + '">重置身份</span>';
+  } else if (a.checked_in_today) {
+    ops = UI.off('已签到', '今日已签到');
+  } else {
+    ops = UI.act('data-ca-ck', id, '签到', '今天签到（走账号自己的持久会话，不弹浏览器）');
   }
   // 积分列：余额 / 总量（与积分总览同一口径），没有数据就显示「—」。
   const bal = (a.credits === null || a.credits === undefined)
     ? '<span class="note">—</span>'
-    : '<b>' + fmtNum(a.credits) + '</b>' +
-      (a.credits_total !== null && a.credits_total !== undefined
-        ? ' <span class="note">/ ' + fmtNum(a.credits_total) + '</span>' : '');
+    : ckBalHtml(a.credits, a.credits_total, a.credits_used,
+      a.login_expired ? '会话失效 · 上次快照' : '华为云');
   return '<div class="ca-sum" data-ca-sum="' + esc(id) + '">' +
     '<div class="who"><div class="nm" title="' + esc(id) + '">' + esc(name) + '</div>' +
     '<div class="id">' + esc(id) + '</div></div>' +
@@ -6182,9 +6645,12 @@ function caDetailHtml(a, slot) {
   };
   const id = String(a.id || '');
   const isDone = !!a.checked_in_today;
+  const needsLogin = caStatusPhrase(a) === '需重新登录';
   const ck = isDone
     ? UI.off('已签到', '今日已签到')
-    : UI.act('data-ca-ck', id, '签到', '今天签到');
+    : (needsLogin
+      ? UI.act('data-ca-relogin', id, '登录并签到', '重开该号的登录窗口；登录成功后自动保存并领取今天积分')
+      : UI.act('data-ca-ck', id, '签到', '今天签到'));
   return '<div class="ca-detail-body">' +
     row('票据到期', caTime(a.ticket_deadline)) +
     row('会话约至（估算）', caTime(a.session_expires_at)) +
@@ -6289,7 +6755,7 @@ async function loadCkCodeArts(quiet) {
     list.querySelectorAll('button[data-ca-keepalive]').forEach(b => { b.onclick = () => doCaAction('keepalive', b.dataset.caKeepalive, b); });
     list.querySelectorAll('button[data-ca-renew]').forEach(b => { b.onclick = () => doCaAction('renew', b.dataset.caRenew, b); });
     list.querySelectorAll('button[data-ca-rm]').forEach(b => { b.onclick = () => doCaRemove(b.dataset.caRm); });
-    list.querySelectorAll('button[data-ca-relogin]').forEach(b => { b.onclick = () => doCaRelogin(b.dataset.caRelogin); });
+    list.querySelectorAll('button[data-ca-relogin]').forEach(b => { b.onclick = () => doCaRelogin(b.dataset.caRelogin, true); });
     list.querySelectorAll('[data-ca-forget]').forEach(el => { el.onclick = () => doCaSlotForget(el.dataset.caForget); });
   } catch (e) { st.hidden = false; st.className = 'state err'; st.textContent = e.message; }
 }
@@ -6311,6 +6777,13 @@ function watchCaLogin() {
         if (box) box.hidden = true;
         toast(r.message || '已添加账号', 'ok');
         loadCkCodeArts(true);
+        const intent = caLoginIntent;
+        caLoginIntent = null;
+        // 登录并签到：后端在保存会话时已经自动领了一次；这里再调一次签到接口，
+        // 把「领取结果」用 toast 明确回显（接口幂等，已领会返回 already）。
+        if (intent && intent.autoCheckin) {
+          doCaCheckin(null, r.id || intent.id);
+        }
       } else if (r && r.message) {
         const b2 = $('addCaState');
         if (b2) { b2.hidden = false; b2.className = 'state'; b2.textContent = r.message; }
@@ -6322,6 +6795,7 @@ function watchCaLogin() {
 }
 
 async function doCaAdd() {
+  caLoginIntent = null; // 添加新号：登录成功只入库，不指定补签账号
   try {
     const d = await api('ide/codearts/browser/start', { method: 'POST', body: '{}' });
     toast(d.message || '浏览器已打开，请登录华为云');
@@ -6344,8 +6818,9 @@ async function doCaAdd() {
 
 // doCaRelogin 单账号重新登录：带 id 打开登录窗口，复用该号**自己的身份槽**
 // （同一台设备重登，不凭空多出一台"新设备"）。只在「需重新登录」时出现。
-async function doCaRelogin(id) {
+async function doCaRelogin(id, autoCheckin) {
   if (!id) return;
+  caLoginIntent = { id, autoCheckin: !!autoCheckin };
   try {
     const d = await api('ide/codearts/browser/start', { method: 'POST', body: JSON.stringify({ id }) });
     toast(d.message || '已打开登录窗口，请登录华为云');
@@ -6357,7 +6832,10 @@ async function doCaRelogin(id) {
     }
     if ($('btnCaStop')) $('btnCaStop').hidden = false;
     watchCaLogin();
-  } catch (e) { toast('打开登录窗口失败：' + e.message, 'err'); }
+  } catch (e) {
+    caLoginIntent = null;
+    toast('打开登录窗口失败：' + e.message, 'err');
+  }
 }
 
 // doCaSlotForget 重置身份（换设备）：改 SlotID/DeviceGUID，旧槽目录自动备份。
@@ -6403,7 +6881,8 @@ async function doCaCheckin(btn, id) {
     let text, ok = true;
     if (rs.length === 1) {
       const r = rs[0];
-      text = r.phase === 'claimed' ? '签到成功 +1000 积分' : (r.msg || r.phase);
+      // 面额以活动页/后端返回为准；写死 +1000 会与实际的 +100 冲突。
+      text = r.msg || (r.phase === 'claimed' ? '签到成功' : r.phase);
       ok = r.phase === 'claimed' || r.phase === 'already';
     } else {
       text = (d && d.msg) || '完成';
@@ -6659,7 +7138,7 @@ async function loadQkCredits(quiet) {
         (a.current ? '<span class="tag mute" style="margin-left:6px">当前</span>' : '') + '</div>' +
         '<div class="id">' + esc(identLabel(email, '未设置')) + '</div></td>' +
         '<td class="num" data-qk-total="' + esc(email) + '"><span class="note">查询中…</span></td>' +
-        '<td class="num"><b>+100</b></td></tr>';
+        '<td class="num" data-qk-gain="' + esc(email) + '"><b>+100</b></td></tr>';
     }).join('');
     // 逐号查额度：各账号用自己的 token，与「当前登录」无关。
     tb.querySelectorAll('[data-qk-total]').forEach(cell => {
@@ -6668,9 +7147,20 @@ async function loadQkCredits(quiet) {
         if (!u || u.phase !== 'ok') { cell.innerHTML = '<span class="note">' + esc((u && u.msg) || '无数据') + '</span>'; return; }
         const pkg = (u.user_quota && u.user_quota.remaining) || 0;
         const addon = (u.add_on_quota && u.add_on_quota.remaining) || 0;
-        cell.innerHTML = '<b>' + (pkg + addon).toLocaleString('zh-CN') + '</b>' +
-          (u.plan_tier_name ? ' <span class="tag mute">' + esc(u.plan_tier_name) + '</span>' : '') +
-          '<div class="note">套餐 ' + pkg + ' + 附加 ' + addon + '</div>';
+        const pkgUsed = (u.user_quota && u.user_quota.used) || 0;
+        const addonUsed = (u.add_on_quota && u.add_on_quota.used) || 0;
+        const pkgTotal = (u.user_quota && u.user_quota.total) || 0;
+        const addonTotal = (u.add_on_quota && u.add_on_quota.total) || 0;
+        const plan = u.plan_tier_name || u.plan_tier || '';
+        const free = String(u.plan_tier || '').toLowerCase() === 'free';
+        cell.innerHTML = ckBalHtml(pkg + addon, pkgTotal + addonTotal, pkgUsed + addonUsed,
+          (plan ? '计划 ' + plan : '') + (free ? ' · 官方已停发' : ''));
+        const gainCell = tb.querySelector('[data-qk-gain="' + CSS.escape(email) + '"]');
+        if (gainCell) {
+          gainCell.innerHTML = free
+            ? '<span class="tag bad">官方已停发</span>'
+            : '<b>+100</b><div class="note">Pro / 付费订阅</div>';
+        }
       }).catch(e => { cell.innerHTML = '<span class="note">' + esc(e.message) + '</span>'; });
     });
   } catch (e) { st.hidden = false; st.className = 'state err'; st.textContent = e.message; }
@@ -6702,7 +7192,7 @@ async function loadWkCredits(quiet) {
         if (!out) return;
         if (r.ok && r.usage) {
           if (r.usage.remaining != null) {
-            out.innerHTML = '<b>' + r.usage.remaining + '</b>' + (r.usage.total != null ? ' / ' + r.usage.total : '');
+            out.innerHTML = ckBalHtml(r.usage.remaining, r.usage.total, null, '上游额度');
             return;
           }
           const found = {};
@@ -6751,8 +7241,8 @@ async function loadMmCredits(quiet) {
       const ident = a.email || a.user_id || a.id || '';
       const remain = Number(a.credits || 0);
       const total = Number(a.credits_total || 0);
-      const bal = '<b>' + remain.toLocaleString('zh-CN') + '</b>' +
-        (total > 0 ? ' <span class="note">/ 总量 ' + total.toLocaleString('zh-CN') + '</span>' : '');
+      const bal = ckBalHtml(remain, total, null,
+        (a.region === 'global' ? '国际版' : '国内版') + (a.credits_details ? ' · ' + a.credits_details.length + ' 个包' : ''));
       const gain = a.claimed_today
         ? '<span style="color:var(--ink-3)">今日已签</span>'
         : '<b>+' + Number(a.points_today || 0).toLocaleString('zh-CN') + '</b>';
@@ -6788,12 +7278,13 @@ async function loadCaCredits(quiet) {
       const remain = a.credits;
       const total = a.credits_total;
       const bal = (remain === null || remain === undefined)
-        ? '<span style="color:var(--ink-3)">—</span>'
-        : '<b>' + Number(remain).toLocaleString('zh-CN') + '</b>' +
-          (total !== null && total !== undefined ? ' / ' + Number(total).toLocaleString('zh-CN') : '');
+        ? '<span class="note">—</span>'
+        : ckBalHtml(remain, total, a.credits_used,
+          a.login_expired ? '会话失效 · 余额为上次快照' : '华为云');
       const gain = a.checked_in_today
-        ? '<span style="color:var(--ink-3)">今日已签</span>'
-        : '<b>+' + Number(a.daily_bonus || 0).toLocaleString('zh-CN') + '</b>';
+        ? '<span class="note">今日已签</span>'
+        : '<b>+' + Number(a.daily_bonus || 0).toLocaleString('zh-CN') + '</b>' +
+          (a.login_expired ? '<div class="note">需重新登录</div>' : '');
       const dead = a.login_expired ? '<span class="tag mute">会话失效</span>' : '';
       return '<tr><td class="who"><div class="nm">' + esc(identName(label, a.email, '账号')) +
         (dead ? dead : '') + '</div>' +

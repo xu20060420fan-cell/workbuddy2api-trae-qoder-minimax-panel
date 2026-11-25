@@ -28,17 +28,17 @@ func TestCodeartsAccountItemBaseFields(t *testing.T) {
 
 	acc := &codearts.Account{
 		ID: "ca1d671920b4", Label: "CodeArts huvj421wxe",
-		SavedAt:        "2026-11-02T18:15:08+08:00",
-		LastOKAt:       "2026-11-02T14:30:00+08:00",
-		TicketSource:   "session",
-		RenewNextAt:    "2026-11-03T10:00:00+08:00",
-		RenewResult:    "failed",
-		RenewFailAt:    "2026-11-03T09:00:00+08:00",
-		RenewFailMsg:   "票据换不回会话",
-		ProbeState:     "session_only",
-		ProbeMsg:       "SSOTGC 等全部为会话 Cookie",
-		ProbeAt:        "2026-11-03T09:00:00+08:00",
-		Cookies:        []codearts.Cookie{caObs("SSOTGC", "a", -1), caObs("SSOJTC", "b", -1), caUnknown("cbc-sid", "c")},
+		SavedAt:      "2026-11-02T18:15:08+08:00",
+		LastOKAt:     "2026-11-02T14:30:00+08:00",
+		TicketSource: "session",
+		RenewNextAt:  "2026-11-03T10:00:00+08:00",
+		RenewResult:  "failed",
+		RenewFailAt:  "2026-11-03T09:00:00+08:00",
+		RenewFailMsg: "票据换不回会话",
+		ProbeState:   "session_only",
+		ProbeMsg:     "SSOTGC 等全部为会话 Cookie",
+		ProbeAt:      "2026-11-03T09:00:00+08:00",
+		Cookies:      []codearts.Cookie{caObs("SSOTGC", "a", -1), caObs("SSOJTC", "b", -1), caUnknown("cbc-sid", "c")},
 	}
 	item := codeartsAccountItemBase(acc)
 
@@ -146,6 +146,7 @@ func TestCodeartsSelectAccounts(t *testing.T) {
 		t.Fatalf("不存在的 id 不应命中，实际 %d", len(got))
 	}
 }
+
 // TestCodeartsKeepalivePhase 验活的四个 phase 与"网络错误不得报 expired"。
 func TestCodeartsKeepalivePhase(t *testing.T) {
 	cases := []struct {
@@ -177,5 +178,23 @@ func TestCodeartsKeepalivePhase(t *testing.T) {
 func TestCodeartsKeepalivePhaseNilErrNotExpired(t *testing.T) {
 	if phase, _ := codeartsKeepalivePhase(false, nil); phase == "expired" {
 		t.Fatal("没有错误信息时不得报 expired")
+	}
+}
+
+// TestCodeartsTodayGainOnlyToday 今日积分只能来自今天的领取记录。
+// 旧实现只判 LastGain>0，11-04 领的 100 分会一直显示成「今日 +100」，
+// 与 checked_in_today=false 互相矛盾。
+func TestCodeartsTodayGainOnlyToday(t *testing.T) {
+	t.Setenv("IDEAUTH_POOL_DIR", t.TempDir())
+	today := &codearts.Account{ID: "today", LastGain: 100, LastGainAt: time.Now().Format(time.RFC3339)}
+	item := codeartsAccountItemBase(today)
+	if item["today_gain"] != 100.0 {
+		t.Errorf("今天的领取应显示 today_gain=100，实际 %v", item["today_gain"])
+	}
+
+	old := &codearts.Account{ID: "old", LastGain: 100, LastGainAt: time.Now().Add(-48 * time.Hour).Format(time.RFC3339)}
+	item2 := codeartsAccountItemBase(old)
+	if _, ok := item2["today_gain"]; ok {
+		t.Errorf("前天的领取不得显示为今日积分：%v", item2)
 	}
 }

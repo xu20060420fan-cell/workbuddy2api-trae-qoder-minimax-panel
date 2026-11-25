@@ -10,6 +10,7 @@
 //   - /chat/home 仍然显示「登录华为云」（应用自己的登录态判断）；
 //   - /developer/ 直接 302 到 auth.huaweicloud.com 登录页；
 //   - 纯 HTTP 带同一批 Cookie 与不带 Cookie，响应完全一致。
+//
 // ⇒ Cookie 快照只能当**身份标识**，签到必须复用登录时那个浏览器的 profile。
 //
 // 流程（2026-11-03 起改为「每号一个身份槽」，见 codearts_slot.go / §H）：
@@ -39,6 +40,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/linguo2625469/workbuddy2api-panel/internal/clockskew"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/codearts"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/ideauth"
 )
@@ -594,7 +596,7 @@ func mustCDPCookies(port int) []codearts.Cookie {
 // codeartsNavigateTo 把登录窗口里**当前正在登录的那个页面**导航到目标 URL。
 //
 // 为什么只导航当前页而不是新开标签：新开标签会打断 authui 的页面上下文
-//（client_key、service 参数都在原页面的 URL 上），而且用户会看到多一个标签页。
+// （client_key、service 参数都在原页面的 URL 上），而且用户会看到多一个标签页。
 func codeartsNavigateTo(port int, target string) error {
 	pages, err := caListPages(port)
 	if err != nil {
@@ -890,7 +892,9 @@ const codeartsProbeJS = `(() => {
 // codeartsCheckin 给一批 CodeArts 账号签到。
 //
 // 主路径是**纯 HTTP**（Cookie + 接口），不依赖任何浏览器窗口：
-//   查活动列表 → 找到每日签到活动 → 没领就领（带幂等键）→ 刷新积分。
+//
+//	查活动列表 → 找到每日签到活动 → 没领就领（带幂等键）→ 刷新积分。
+//
 // 浏览器只在这两种情况下才登场：① 登录窗口还开着（人就在旁边）；② 兜底提示。
 func (p *Panel) codeartsCheckin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -1033,7 +1037,7 @@ func (p *Panel) codeartsClaim(acc *codearts.Account) (phase, msg, sample string,
 // 为什么必须核对：调试端口是**独占但会回收**的——上一个登录窗口关掉后，
 // 端口立刻被 freePort 重新分配给下一个登录窗口。号池里旧账号残留的 Port
 // 记录就会指向别人的窗口；不核对就等于**拿别人的会话替这个号签到**
-//（面板显示"签到成功"，实际领的是另一个人的积分）。
+// （面板显示"签到成功"，实际领的是另一个人的积分）。
 //
 // 判据：窗口里的华为云 Cookie 算出的 Identity 要和账号一致；
 // 拿不到稳定标识时保守地认为**不是**这个人（宁可少签，不可假签）。
@@ -1239,11 +1243,24 @@ func codeartsAccountItemBase(a *codearts.Account) map[string]any {
 	if len(a.Aliases) > 0 {
 		item["aliases"] = a.Aliases
 	}
-	if a.LastGain > 0 {
+	// today_gain 必须限定在**今天**（UTC+8）。此前只判 LastGain>0，
+	// 于是 11-04 领过的 100 分到了 11-25 仍显示「今日 +100」——
+	// 与 checked_in_today=false 正好互相矛盾，用户会以为今天已经签过。
+	if a.LastGain > 0 && codeartsGainIsToday(a.LastGainAt) {
 		item["today_gain"] = a.LastGain
 		item["today_gain_at"] = a.LastGainAt
 	}
 	return item
+}
+
+// codeartsGainIsToday 判断一次领取记录是否发生在今天（UTC+8）。
+// 解析失败按"不是今天"处理：宁可少显示，也不把历史领取冒充今日。
+func codeartsGainIsToday(raw string) bool {
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return codeartsAutoDayOf(t) == codeartsAutoDayOf(clockskew.Now())
 }
 
 // codeartsSaveAccountSnapshot 把积分/活动快照写回号池（值没变就不写）。
@@ -1411,7 +1428,7 @@ func trimText(s string, n int) string {
 // codeartsAPIsProbe 在登录窗口里读 performance 资源，找出后端 API 路径。
 //
 // 目的：换成「Cookie + HTTP 直连」的方案，就先把页面自己调过的接口抓出来
-//（积分/签到/福利相关），之后不依赖窗口也能调。
+// （积分/签到/福利相关），之后不依赖窗口也能调。
 func codeartsAPIsProbe(port int) ([]string, error) {
 	ws, err := caConnectPage(port, "huaweicloud")
 	if err != nil {
@@ -1789,7 +1806,6 @@ func (p *Panel) codeartsMigratePool() {
 	log.Printf("[codearts] 号池整理：合并 %d 条重复账号、改名 %d 个消重，现剩 %d 个",
 		merged, relabeled, len(probe.Accounts))
 }
-
 
 // codeartsKeepalive 后台保活：定时用 Cookie 调一次轻量接口。
 //

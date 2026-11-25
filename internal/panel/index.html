@@ -102,7 +102,7 @@ body {
 .qgroup header .nm { font-weight: 600; font-size: 13.5px; }
 .qgroup header .cnt { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .qrow {
-  display: grid; grid-template-columns: 118px 1fr 52px 84px minmax(120px, 240px);
+  display: grid; grid-template-columns: 118px minmax(160px, 1fr) 52px 84px minmax(110px, 220px) 92px;
   gap: 10px; align-items: center; padding: 7.5px 16px; font-size: 13px;
 }
 .qrow:hover { background: var(--surface-2); }
@@ -112,6 +112,10 @@ body {
 .qrow .prog { font-variant-numeric: tabular-nums; color: var(--ink-2); text-align: right; }
 .qrow .st { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .qrow .msg { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qrow .qact { display: flex; justify-content: flex-end; }
+.qrow .qact button { white-space: nowrap; }
+.qgroup header .qa { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.qgroup header .qa .note { font-size: 11.5px; }
 .qdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .qdot.done { background: var(--ok); }
 .qdot.run { background: var(--accent); animation: qpulse 1.2s ease-in-out infinite; }
@@ -218,7 +222,12 @@ button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 button.ghost { background: transparent; }
 button.danger { color: var(--bad); }
 button.danger:hover:not(:disabled) { border-color: var(--bad); }
-button.xs { padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; white-space: nowrap; }
+button.xs, a.xs { padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; white-space: nowrap; }
+a.xs {
+  display: inline-flex; align-items: center; text-decoration: none; color: var(--ink);
+  background: var(--surface-2); border: 1px solid var(--line); font-weight: 500;
+}
+a.xs:hover { border-color: var(--accent); }
 /* select.xs：header 里的紧凑选择框。通用 input/select 规则是 width:100%（表单页用），
    header 里若不收窄会把同行 note 挤到换行——收成内容宽并压小外观，与 button.xs 同款。 */
 select.xs { width: auto; padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; }
@@ -530,20 +539,30 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .acc.zebra tbody tr:hover { background: var(--surface-2); }
 
   /* ── 积分构成 ───────────────────────────────────────────────── */
-  .pk-grid { display: flex; flex-wrap: wrap; gap: 10px; }
-  .pk-card { flex: 1 1 220px; min-width: 200px; border: 1px solid var(--line-soft);
-    border-radius: 8px; padding: 11px 13px; }
-  .pk-card .who { display: flex; align-items: baseline; gap: 7px; margin-bottom: 7px; }
-  .pk-card .nm { font-weight: 600; font-size: 13px; }
-  .pk-card .realm { font-size: 11px; color: var(--ink-3); font-family: var(--mono); }
-  .pk-card .big { font: 600 24px/1.1 var(--mono); font-variant-numeric: tabular-nums; }
-  .pk-card .sub { font-size: 11.5px; color: var(--ink-3); margin-top: 3px; }
+  /* 固定网格而不是 flex 自动拉伸：账号数不同（2/3/5 个）时卡片宽度必须一致，
+     否则 Trae 两张卡占半屏、WorkBuddy 三张卡占三分之一，看起来像两个页面。 */
+  .pk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+  .pk-card { min-width: 0; border: 1px solid var(--line-soft);
+    border-radius: 9px; padding: 12px 14px; background: var(--surface); }
+  .pk-card .who { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 7px; }
+  .pk-card .nm { font-weight: 700; font-size: 13.5px; color: var(--ink); }
+  .pk-card .realm { font-size: 11px; color: var(--ink-2); font-family: var(--mono); }
+  .pk-card .big { font: 700 25px/1.1 var(--mono); font-variant-numeric: tabular-nums; color: var(--ink); }
+  .pk-card .big .of { font-size: 12px; color: var(--ink-2); font-weight: 500; }
+  .pk-card .sub { font-size: 11.5px; color: var(--ink-2); margin-top: 3px; }
   .pk-card .mixbar { display: flex; height: 7px; border-radius: 4px; overflow: hidden;
     margin-top: 8px; background: var(--surface-2); }
-  .pk-card .mixbar i { display: block; height: 100%; }
-  .pk-card .err { color: var(--warn); font-size: 12px; }
+  .pk-card .mixbar i { display: block; height: 100%; min-width: 1px; }
+  .pk-card .err { color: var(--bad); font-size: 12px; line-height: 1.6; }
+  .pk-card .note { color: var(--ink-2); }
+  .pk-plat { margin-top: 16px; }
+  .pk-plat:first-child { margin-top: 2px; }
+  .pk-plat-h { display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+    padding: 0 2px 7px; margin-bottom: 9px; border-bottom: 1px solid var(--line); }
+  .pk-plat-h .sum { font-size: 11.5px; color: var(--ink-2); }
+  .pk-plat .empty { padding: 12px 2px; color: var(--ink-2); font-size: 12px; }
   .pk-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 7px;
-    font-size: 11px; color: var(--ink-3); }
+    font-size: 11px; color: var(--ink-2); }
   .pk-legend span { display: flex; align-items: center; gap: 5px; }
   .pk-legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
   .pk-group-summary td { padding: 7px 11px; background: var(--surface-2); }
@@ -634,6 +653,19 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .vtabs .cnt { color: var(--ink-3); font-weight: 400; margin-left: 4px; font-variant-numeric: tabular-nums; }
   .vtabs button.on .cnt { color: var(--ink-2); }
 
+  /* ── 各平台额度用量（用量页）────────────────────────────────────────
+     与积分总览同一套平台色；数字用 mono 加粗，账号名用正文色，
+     避免"一整行都是灰字、分不清谁是谁"。 */
+  .use-plat .who .nm { color: var(--ink); font-weight: 650; }
+  .use-plat .who .id { color: var(--ink-2); }
+  .use-plat .num b { color: var(--ink); font-weight: 700; }
+  .use-plat .num .muted, .use-plat .muted { color: var(--ink-2); }
+  .use-plat .pctbar { display: block; width: 92px; height: 5px; margin-top: 5px;
+    border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+  .use-plat .pctbar i { display: block; height: 100%; border-radius: 3px; }
+  .use-plat .plat-cell { display: flex; align-items: center; gap: 8px; }
+  .use-plat .plat-cell .note { color: var(--ink-2); }
+
   /* ── 请求记录表（运行日志）────────────────────────────────────────── */
   .acc.req { min-width: 1080px; }
   .acc.req th, .acc.req td { padding: 8px 10px; }
@@ -658,7 +690,68 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .exp-nm { font-weight: 600; flex: none; min-width: 9em; }
   .exp-main { color: var(--ink-2, inherit); }
   .exp-main b { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-  .ck-group { margin: 14px 16px 4px; padding-bottom: 4px; font-weight: 600; font-size: 13px; color: var(--ink-2); border-bottom: 1px solid var(--line-soft); }
+  /* 平台分组标题：积分总览/积分构成的第一眼锚点。
+     旧样式是 13px + var(--ink-2) 的淡灰，用户反馈"看不清谁是谁"——
+     现在改成正文墨色 + 加粗 + 左侧平台色条，深浅两套主题都保持高对比。 */
+  .ck-group {
+    margin: 18px 16px 6px; padding: 0 0 7px 10px;
+    font: 700 15px/1.2 var(--sans); color: var(--ink);
+    letter-spacing: .01em; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 8px; position: relative;
+  }
+  .ck-group::before {
+    content: ''; position: absolute; left: 0; top: 1px; bottom: 7px;
+    width: 3px; border-radius: 2px; background: var(--accent);
+  }
+  .ck-group[data-p="workbuddy"]::before { background: #4f8cff; }
+  .ck-group[data-p="qoder"]::before { background: #c96bd6; }
+  .ck-group[data-p="trae"]::before { background: #e8a33d; }
+  .ck-group[data-p="minimax"]::before { background: #25b08b; }
+  .ck-group[data-p="codearts"]::before { background: #e2607a; }
+  .ck-group .cnt { font: 400 12px var(--sans); color: var(--ink-2); }
+  .ck-group .plat-badge { margin-left: 0; }
+
+  /* 平台徽标：同色系浅底 + 深字，跨页面统一（积分总览/积分构成/用量）。 */
+  .plat-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 1px 8px; border-radius: 999px; border: 1px solid transparent;
+    font: 650 11.5px/1.55 var(--sans); white-space: nowrap;
+    color: var(--ink); background: var(--surface-2);
+  }
+  .plat-badge::before {
+    content: ''; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--pb, var(--accent)); flex: none;
+  }
+  .plat-badge[data-p="workbuddy"] { --pb: #4f8cff; background: color-mix(in srgb, #4f8cff 13%, var(--surface)); border-color: color-mix(in srgb, #4f8cff 26%, transparent); }
+  .plat-badge[data-p="qoder"] { --pb: #c96bd6; background: color-mix(in srgb, #c96bd6 13%, var(--surface)); border-color: color-mix(in srgb, #c96bd6 26%, transparent); }
+  .plat-badge[data-p="trae"] { --pb: #e8a33d; background: color-mix(in srgb, #e8a33d 15%, var(--surface)); border-color: color-mix(in srgb, #e8a33d 28%, transparent); }
+  .plat-badge[data-p="minimax"] { --pb: #25b08b; background: color-mix(in srgb, #25b08b 13%, var(--surface)); border-color: color-mix(in srgb, #25b08b 26%, transparent); }
+  .plat-badge[data-p="codearts"] { --pb: #e2607a; background: color-mix(in srgb, #e2607a 13%, var(--surface)); border-color: color-mix(in srgb, #e2607a 26%, transparent); }
+
+  /* 活动规则提示条：官方规则变动/资格限制必须一眼可见，不能藏在 title 里。 */
+  .rule-banner {
+    margin: 12px 16px 4px; padding: 11px 13px 11px 15px;
+    border: 1px solid var(--line); border-left: 3px solid var(--warn);
+    border-radius: 8px; background: color-mix(in srgb, var(--warn) 7%, var(--surface));
+    color: var(--ink-2); font-size: 12.5px; line-height: 1.65;
+  }
+  .rule-banner[data-kind="info"] { border-left-color: var(--accent); background: var(--accent-soft); }
+  .rule-banner[data-kind="bad"] { border-left-color: var(--bad); background: var(--bad-soft); }
+  .rule-banner b { color: var(--ink); font-weight: 700; }
+  .rule-banner .rb-title { display: flex; align-items: center; gap: 7px; margin-bottom: 3px; font-weight: 700; color: var(--ink); }
+  .rule-banner .rb-title .tag { font-weight: 500; }
+  .rule-banner details { margin-top: 7px; }
+  .rule-banner summary {
+    cursor: pointer; color: var(--accent); font-weight: 600; font-size: 12px;
+    list-style: none; display: inline-flex; align-items: center; gap: 5px;
+  }
+  .rule-banner summary::-webkit-details-marker { display: none; }
+  .rule-banner summary::before { content: '▸'; font-size: 10px; transition: transform .15s; }
+  .rule-banner details[open] summary::before { transform: rotate(90deg); }
+  .rule-banner .rb-body { margin-top: 7px; padding-top: 7px; border-top: 1px dashed var(--line); }
+  .rule-banner .rb-body ul { margin: 4px 0 0 18px; padding: 0; }
+  .rule-banner .rb-body li { margin: 3px 0; }
+  .rule-banner code { font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
   .wb-group { margin-top: 4px; }
   .wb-group + .wb-group { border-top: 1px dashed var(--line-soft); margin-top: 10px; padding-top: 6px; }
   .wb-group-h { display: flex; align-items: center; gap: 8px; padding: 8px 4px 4px;
@@ -745,13 +838,18 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <header>
           <h3>成长任务队列 <span class="hint" id="qcSummary"></span></h3>
           <span class="grow"></span>
+          <a class="xs" href="workbuddy://" title="打开 WorkBuddy 客户端（需客户端完成的任务在客户端里操作）">打开客户端</a>
           <button class="xs" id="btnSchoolVouchers" title="开学季抽奖抽中的第三方券码（活动已结束，历史券码仍可查）">查询券码</button>
           <label class="sel-note">并发
             <select id="qcConc"><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option></select>
           </label>
           <button class="xs" id="btnScanAll">扫描待办</button>
-          <button class="xs primary" id="btnRunQueue">执行可自动任务</button>
+          <button class="xs primary" id="btnRunQueue" title="只执行面板有自动动作的任务；需客户端/真实操作的任务会逐项说明原因">一键完成可自动任务</button>
         </header>
+        <div class="note" id="tcAutoHint" style="padding:8px 16px 0;color:var(--ink-2)">
+          扫描结果分三类：<b>可自动执行</b>（行尾「一键完成」）、<b>未解锁</b>（到点自动执行）、
+          <b>需客户端/真实操作</b>（行尾「指引」）。没有自动动作的任务不会被伪装成完成。
+        </div>
         <div class="qprog" id="qProg" hidden>
           <div class="qbar"><i id="qBarFill"></i></div>
           <span class="note" id="qProgText"></span>
@@ -814,9 +912,34 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3>Qoder 签到</h3>
           <span class="grow"></span>
           <span class="note" id="ckQoderSummary"></span>
-          <a class="note" href="https://docs.qoder.com/zh/events/100credits" target="_blank" rel="noopener noreferrer">活动规则</a>
+          <a class="note" href="https://docs.qoder.com/zh/events/100credits" target="_blank" rel="noopener noreferrer">官方活动页</a>
           <button class="xs primary" id="btnCkQoderCheckinAll">全部签到</button>
         </header>
+        <!-- 官方规则提示：免费账号已经领不到了，必须一眼可见（2026-11-19 起）。
+             细节收在 details 里，默认不占满屏；链接直达官方活动页。 -->
+        <div class="rule-banner" data-kind="bad" id="ckQoderRule">
+          <div class="rb-title">官方已收紧发放范围 <span class="tag bad">Free 不再发放</span></div>
+          自 <b>2026-11-19 10:00</b> 起，Qoder 每日 100 通用 Credits 仅面向
+          <b>Pro 试用期</b>及 <b>Lite / Pro / Pro+ / Ultra 个人付费订阅</b>用户；
+          <b>体验版（Free）不再开放领取</b>。面板上标着 <code>Free</code> 的账号点签到不会到账，
+          状态会显示「未查到可领活动」，这是官方规则，不是面板故障。
+          <details>
+            <summary>展开完整活动规则（官方口径）</summary>
+            <div class="rb-body">
+              <ul>
+                <li><b>开始时间</b>：2026-09-18 10:00（新加坡时间 UTC+8）。结束时间另行公告。</li>
+                <li><b>适用用户</b>：Qoder 国际版 Pro 试用期用户，以及 Lite、Pro、Pro+、Ultra 个人付费订阅用户；团队版（Teams）/企业版（Enterprise）不适用；体验版（Free）自 2026-11-19 10:00 起不再开放。</li>
+                <li><b>领取窗口</b>：每日 10:00 开放新一轮，持续到次日 10:00 前；每账号每轮限领 1 次，每次 100 通用 Credits，需主动领取。</li>
+                <li><b>补领</b>：错过窗口不可补领，未领取的额度不累计到下一轮。</li>
+                <li><b>有效期</b>：每笔奖励自领取之日起 30 天，到期未用自动失效；后续领取不会延长此前奖励的有效期，但未用完的 Credits 可跨天保留。</li>
+                <li><b>领取渠道</b>：Qoder 桌面端 / 移动端 / Qoder IDE 的「用量面板 → 礼物图标」；本面板通过账号自己的 token 代领，不改变账号订阅状态。</li>
+                <li><b>使用范围</b>：Qoder、Qoder IDE、JetBrains 插件、CLI、QoderWake、Cloud Agents、移动端、网页版。</li>
+                <li><b>扣减顺序</b>：优先消耗最早到期的 Credits；到期时间相同时先套餐内、再资源包（Add-on）。</li>
+                <li><b>免费用户 FAQ</b>：调整前已领取的 Credits 不会被收回，仍在各自 30 天有效期内可用；开通 Pro 试用或付费订阅后，从下一轮起可继续领取。</li>
+              </ul>
+            </div>
+          </details>
+        </div>
         <div class="state" id="ckQoderState"><span class="dots">加载中</span></div>
         <div id="ckQoderList"></div>
         <!-- 一键签到的七相分桶结果（claimed/already/blocked/pending/failed/login_required/error） -->
@@ -831,6 +954,27 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button class="xs" id="btnMmRenewAll" title="给号池全部账号续期凭证（token 只有 1 小时，定时任务每 30 分钟也会自动续）">全部续期</button>
           <button class="xs primary" id="btnMmCheckinAll">全部签到</button>
         </header>
+        <!-- 官方规则：签到不限 Pro；Pro 的差异在「额度重置卡」等活动权益。
+             用户容易把 Qoder 的 Pro 限制套到 MiniMax 上，这里直接写清楚。 -->
+        <div class="rule-banner" data-kind="info" id="ckMmRule">
+          <div class="rb-title">签到资格与奖励 <span class="tag ok">登录即可</span></div>
+          官方现行规则：<b>MiniMax Code 登录账号即可签到，并未限定 Pro</b>。每日基础
+          <b>400 积分</b>，连续第 <b>4</b> 天、第 <b>7</b> 天各 <b>1000</b> 积分，满一周约
+          <b>4000</b> 积分；积分自到账起 <b>30 天</b>有效，可累计使用。
+          Pro 订阅的额外权益主要是活动期的「周额度重置卡」，不是签到门槛。
+          <details>
+            <summary>展开签到规则与常见误解</summary>
+            <div class="rb-body">
+              <ul>
+                <li><b>领取方式</b>：MiniMax Code 客户端或网页版「用量页 → 签到」；本面板用账号自己的 OAuth token 代领，不需要切号或客户端在线。</li>
+                <li><b>积分用途</b>：MiniMax Code 内的文本、图像、音频、视频与多模态任务；不含 H3 / H3 Image（官方签到说明明确排除）。</li>
+                <li><b>有效期</b>：每笔签到积分独立计算 30 天，后续签到不会延长旧积分的有效期。</li>
+                <li><b>为什么 Qoder 标 Pro、MiniMax 不标</b>：Qoder 的 100 Credits 自 2026-11-19 起只发给 Pro/付费订阅；MiniMax 的 400 积分签到仍对登录用户开放。两者规则不同，不能互相套用。</li>
+                <li><b>如果签到失败</b>：先看状态列的「凭证过期 / 查询失败」；点「续期」换新 token。免费账号看不到签到入口时，以 MiniMax Code 用量页的实时显示为准。</li>
+              </ul>
+            </div>
+          </details>
+        </div>
         <div class="state" id="ckMmState"><span class="dots">加载中</span></div>
         <div id="ckMmList"></div>
       </div>
@@ -842,6 +986,27 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="note" id="ckCaSummary"></span>
           <button class="xs primary" id="btnCaCheckinAll">全部签到</button>
         </header>
+        <!-- 华为云的网页会话约 7 小时就失效；失效后自动续期救不回来，
+             必须在账号行点「登录并签到」重新扫码。把这条写在这里，避免用户
+             反复点「全部签到」只得到「会话已失效」。 -->
+        <div class="rule-banner" data-kind="info" id="ckCaRule">
+          <div class="rb-title">华为云会话说明 <span class="tag warn">约 7 小时失效</span></div>
+          华为云网页登录态是短时会话，失效后无法用 Cookie 快照恢复。账号行显示
+          <b>需重新登录</b> 时，点该行的 <b>「登录并签到」</b>：浏览器会打开华为云登录页，
+          扫码/登录成功后自动保存会话并当场领取当天积分，不需要再点第二次签到。
+          <details>
+            <summary>展开签到规则与排查顺序</summary>
+            <div class="rb-body">
+              <ul>
+                <li><b>奖励</b>：每日签到活动（USER_LOGIN）面额以活动页为准，当前为 <b>100 积分/天</b>；余额与总量在「积分总览 → CodeArts（华为）」查看。</li>
+                <li><b>身份隔离</b>：每个账号有独立浏览器身份槽；重新登录会复用原槽，不会凭空多出一台「新设备」。</li>
+                <li><b>同人组</b>：同一人的多个号每天只让一个去打上游，其余号显示跳过；这是为了避免同人/同设备风控，不是签到失败。</li>
+                <li><b>排查顺序</b>：① 行内「登录并签到」→ ② 详情里的「验证会话」→ ③「补采票据寿命」→ ④ 仍失败再「重置身份」（不可逆，换设备身份）。</li>
+                <li><b>为什么不能全自动</b>：华为云登录必须人工扫码/输密码，面板无法代填；登录成功后的保存与领奖是全自动的。</li>
+              </ul>
+            </div>
+          </details>
+        </div>
         <div class="state" id="ckCaState"><span class="dots">加载中</span></div>
         <div id="ckCaList"></div>
       </div>
@@ -878,7 +1043,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button class="xs" id="btnTcRefresh">刷新</button>
         </header>
 
-        <div class="pad"><div class="ck-group">Trae</div></div>
+        <div class="pad"><div class="ck-group" data-p="trae"><span class="plat-badge" data-p="trae">Trae</span><span class="cnt">积分余额 / 签到可得</span></div></div>
         <div class="state" id="tcState"><span class="dots">加载中</span></div>
         <div class="tbl-wrap">
           <table class="acc ckfix">
@@ -887,7 +1052,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </table>
         </div>
 
-        <div class="pad"><div class="ck-group">Qoder</div></div>
+        <div class="pad"><div class="ck-group" data-p="qoder"><span class="plat-badge" data-p="qoder">Qoder</span><span class="cnt">积分余额 / 签到可得</span></div></div>
         <div class="state" id="qkState"><span class="dots">加载中</span></div>
         <div class="tbl-wrap">
           <table class="acc ckfix">
@@ -896,7 +1061,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           </table>
         </div>
 
-        <div class="pad"><div class="ck-group">WorkBuddy</div></div>
+        <div class="pad"><div class="ck-group" data-p="workbuddy"><span class="plat-badge" data-p="workbuddy">WorkBuddy</span><span class="cnt">积分余额 / 签到可得</span></div></div>
         <div class="state" id="wkState"><span class="dots">加载中</span></div>
         <div class="tbl-wrap">
           <table class="acc ckfix">
@@ -907,7 +1072,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
         <!-- MiniMax：签到页能看到 credits，但积分总览里缺这一块，
              用户看不到「总量还剩多少」→ 补上（余额 / 今日可得 / 总量）。 -->
-        <div class="pad"><div class="ck-group">MiniMax</div></div>
+        <div class="pad"><div class="ck-group" data-p="minimax"><span class="plat-badge" data-p="minimax">MiniMax</span><span class="cnt">积分余额 / 签到可得</span></div></div>
         <div class="state" id="mmCrState"><span class="dots">加载中</span></div>
         <div class="tbl-wrap">
           <table class="acc ckfix">
@@ -918,7 +1083,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
         <!-- CodeArts（华为云码道）：同样有每日 100 积分，之前只有签到页能看到，
              积分总览里缺这一块 → 三个平台显示、第四个不显示，看着就不齐。 -->
-        <div class="pad"><div class="ck-group">CodeArts（华为）</div></div>
+        <div class="pad"><div class="ck-group" data-p="codearts"><span class="plat-badge" data-p="codearts">CodeArts（华为）</span><span class="cnt">积分余额 / 签到可得</span></div></div>
         <div class="state" id="caCrState"><span class="dots">加载中</span></div>
         <div class="tbl-wrap">
           <table class="acc ckfix">
@@ -1061,11 +1226,18 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     <section class="view" id="view-packages" hidden>
       <div class="box">
         <header>
-          <h3>Trae / Qoder 积分构成</h3>
+          <h3>积分构成 · 全平台</h3>
           <span class="grow"></span>
-          <span class="note" id="pkIdeaNote"></span>
+          <span class="note" id="pkIdeaNote">WorkBuddy / Qoder / Trae / MiniMax / CodeArts</span>
           <button class="xs" id="btnPkIdea">刷新</button>
         </header>
+        <div class="rule-banner" data-kind="info" style="margin-top:10px">
+          <div class="rb-title">口径说明</div>
+          每张卡都是<b>同一套字段</b>：大字是<b>剩余</b>，副标题是「总量 · 已用 · 包数」，彩条按来源/到期拆分，
+          底部注明签到可得与最近到期。WorkBuddy、Trae、MiniMax 有官方逐包明细；
+          Qoder 官方只给「套餐内 / 附加」两桶；CodeArts 官方只给总量，逐包明细不可得。
+          灰色「—」表示该平台没有这项数据，不伪造。
+        </div>
         <div class="state" id="pkIdeaState"><span class="dots">加载中</span></div>
         <div id="pkIdea"></div>
       </div>
@@ -1081,7 +1253,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
       <div class="box">
         <header>
-          <h3>账号对比</h3>
+          <h3>WorkBuddy 账号对比（逐包）</h3>
           <span class="grow"></span>
           <span class="note" id="pkNote">—</span>
           <select id="pkSort" class="xs" title="逐包明细的排序规则">
@@ -1144,6 +1316,38 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <tbody id="usOffModelBody"></tbody>
             </table>
           </div>
+        </div>
+      </div>
+
+      <!-- 各平台额度用量：修复「用量页只有 WorkBuddy」。
+           数据源与「积分构成」完全一致（官方额度快照），逐请求明细只有
+           WorkBuddy 上游开放；其余平台在说明列如实标注口径。 -->
+      <div class="box">
+        <header>
+          <h3>各平台额度用量</h3>
+          <span class="grow"></span>
+          <span class="note" id="usPlatNote">WorkBuddy / Qoder / Trae / MiniMax / CodeArts</span>
+          <button class="xs" id="btnUsagePlatforms">刷新</button>
+        </header>
+        <div class="kpis k4" id="usPlatKpis"></div>
+        <div class="tbl-wrap">
+          <table class="acc zebra use-plat">
+            <thead><tr>
+              <th class="mark" aria-hidden="true"></th>
+              <th>平台 / 账号</th>
+              <th class="num">已用</th>
+              <th class="num">总量</th>
+              <th class="num">剩余</th>
+              <th class="num">使用率</th>
+              <th>数据口径</th>
+            </tr></thead>
+            <tbody id="usPlatBody"></tbody>
+          </table>
+        </div>
+        <div class="note" style="padding:8px 16px 12px">
+          口径：WorkBuddy 有上游逐请求用量（上方「官方用量」），这里同时给出套餐额度消耗；
+          Qoder / Trae / MiniMax / CodeArts 官方未开放逐请求明细，只能读到「已用 / 总量 / 剩余」的额度快照。
+          标「—」= 该平台没有这项数据，不是 0。
         </div>
       </div>
 
